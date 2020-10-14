@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -16,6 +15,7 @@ import (
 	"github.com/aler9/rtsp-simple-server/loghandler"
 	"github.com/aler9/rtsp-simple-server/metrics"
 	"github.com/aler9/rtsp-simple-server/pprof"
+	"github.com/aler9/rtsp-simple-server/servertcp"
 	"github.com/aler9/rtsp-simple-server/stats"
 )
 
@@ -33,14 +33,13 @@ type program struct {
 	paths            map[string]*path
 	serverUdpRtp     *serverUDP
 	serverUdpRtcp    *serverUDP
-	serverTcp        *serverTCP
+	serverTcp        *servertcp.ServerTCP
 	clients          map[*client]struct{}
 	clientsWg        sync.WaitGroup
 	udpPublishersMap *udpPublishersMap
 	readersMap       *readersMap
 	stats            *stats.Stats
 
-	clientNew          chan net.Conn
 	clientClose        chan *client
 	clientDescribe     chan clientDescribeReq
 	clientAnnounce     chan clientAnnounceReq
@@ -81,7 +80,6 @@ func newProgram(args []string) (*program, error) {
 		udpPublishersMap:   newUdpPublisherMap(),
 		readersMap:         newReadersMap(),
 		stats:              stats.New(),
-		clientNew:          make(chan net.Conn),
 		clientClose:        make(chan *client),
 		clientDescribe:     make(chan clientDescribeReq),
 		clientAnnounce:     make(chan clientAnnounceReq),
@@ -144,7 +142,7 @@ func newProgram(args []string) (*program, error) {
 		}
 	}
 
-	p.serverTcp, err = newServerTCP(p)
+	p.serverTcp, err = servertcp.New(p.log, conf.RtspPort)
 	if err != nil {
 		p.pprof.Close()
 		p.metrics.Close()
@@ -177,8 +175,6 @@ func (p *program) run() {
 		go p.serverUdpRtcp.run()
 	}
 
-	go p.serverTcp.run()
-
 	for _, p := range p.paths {
 		p.onInit()
 	}
@@ -194,7 +190,7 @@ outer:
 				path.onCheck()
 			}
 
-		case conn := <-p.clientNew:
+		case conn := <-p.serverTcp.NewClient:
 			newClient(p, conn)
 
 		case client := <-p.clientClose:
@@ -296,12 +292,11 @@ outer:
 	go func() {
 		for {
 			select {
-			case _, ok := <-p.clientNew:
+			case _, ok := <-p.clientClose:
 				if !ok {
 					return
 				}
 
-			case <-p.clientClose:
 			case <-p.clientDescribe:
 
 			case req := <-p.clientAnnounce:
@@ -327,7 +322,7 @@ outer:
 		p.onClose()
 	}
 
-	p.serverTcp.close()
+	p.serverTcp.Close()
 
 	if p.serverUdpRtcp != nil {
 		p.serverUdpRtcp.close()
@@ -353,7 +348,6 @@ outer:
 
 	p.logHandler.Close()
 
-	close(p.clientNew)
 	close(p.clientClose)
 	close(p.clientDescribe)
 	close(p.clientAnnounce)

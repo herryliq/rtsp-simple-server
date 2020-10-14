@@ -45,18 +45,14 @@ func newServerUDP(p *program, port int, streamType gortsplib.StreamType) (*serve
 		done:       make(chan struct{}),
 	}
 
-	l.log("opened on :%d", port)
-	return l, nil
-}
-
-func (l *serverUDP) log(format string, args ...interface{}) {
 	var label string
 	if l.streamType == gortsplib.StreamTypeRtp {
 		label = "RTP"
 	} else {
 		label = "RTCP"
 	}
-	l.p.log("[UDP/"+label+" server] "+format, args...)
+	p.log("[UDP/"+label+" server] opened on :%d", port)
+	return l, nil
 }
 
 func (l *serverUDP) run() {
@@ -96,7 +92,6 @@ func (l *serverUDP) run() {
 			pub.trackId,
 			l.streamType,
 			buf[:n])
-
 	}
 
 	close(l.writec)
