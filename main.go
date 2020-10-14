@@ -14,6 +14,7 @@ import (
 
 	"github.com/aler9/rtsp-simple-server/conf"
 	"github.com/aler9/rtsp-simple-server/loghandler"
+	"github.com/aler9/rtsp-simple-server/pprof"
 	"github.com/aler9/rtsp-simple-server/stats"
 )
 
@@ -27,7 +28,7 @@ type program struct {
 	conf             *conf.Conf
 	logHandler       *loghandler.LogHandler
 	metrics          *metrics
-	pprof            *pprof
+	pprof            *pprof.Pprof
 	paths            map[string]*path
 	serverUdpRtp     *serverUDP
 	serverUdpRtcp    *serverUDP
@@ -72,14 +73,8 @@ func newProgram(args []string) (*program, error) {
 		return nil, err
 	}
 
-	logHandler, err := loghandler.New(conf.LogDestinationsParsed, conf.LogFile)
-	if err != nil {
-		return nil, err
-	}
-
 	p := &program{
 		conf:               conf,
-		logHandler:         logHandler,
 		paths:              make(map[string]*path),
 		clients:            make(map[*client]struct{}),
 		udpPublishersMap:   newUdpPublisherMap(),
@@ -100,18 +95,25 @@ func newProgram(args []string) (*program, error) {
 		done:               make(chan struct{}),
 	}
 
+	p.logHandler, err = loghandler.New(conf.LogDestinationsParsed, conf.LogFile)
+	if err != nil {
+		return nil, err
+	}
+
 	p.log("rtsp-simple-server %s", Version)
 
 	if conf.Metrics {
 		p.metrics, err = newMetrics(p)
 		if err != nil {
+			p.logHandler.Close()
 			return nil, err
 		}
 	}
 
 	if conf.Pprof {
-		p.pprof, err = newPprof(p)
+		p.pprof, err = pprof.New(p.log)
 		if err != nil {
+			p.logHandler.Close()
 			return nil, err
 		}
 	}
@@ -125,17 +127,23 @@ func newProgram(args []string) (*program, error) {
 	if _, ok := conf.ProtocolsParsed[gortsplib.StreamProtocolUDP]; ok {
 		p.serverUdpRtp, err = newServerUDP(p, conf.RtpPort, gortsplib.StreamTypeRtp)
 		if err != nil {
+			p.pprof.Close()
+			p.logHandler.Close()
 			return nil, err
 		}
 
 		p.serverUdpRtcp, err = newServerUDP(p, conf.RtcpPort, gortsplib.StreamTypeRtcp)
 		if err != nil {
+			p.pprof.Close()
+			p.logHandler.Close()
 			return nil, err
 		}
 	}
 
 	p.serverTcp, err = newServerTCP(p)
 	if err != nil {
+		p.pprof.Close()
+		p.logHandler.Close()
 		return nil, err
 	}
 
@@ -158,10 +166,6 @@ func (p *program) run() {
 
 	if p.metrics != nil {
 		go p.metrics.run()
-	}
-
-	if p.pprof != nil {
-		go p.pprof.run()
 	}
 
 	if p.serverUdpRtp != nil {
@@ -343,7 +347,7 @@ outer:
 	}
 
 	if p.pprof != nil {
-		p.pprof.close()
+		p.pprof.Close()
 	}
 
 	p.logHandler.Close()

@@ -1,4 +1,4 @@
-package main
+package pprof
 
 import (
 	"context"
@@ -8,21 +8,23 @@ import (
 )
 
 const (
-	pprofAddress = ":9999"
+	address = ":9999"
 )
 
-type pprof struct {
+type LogFunc func(string, ...interface{})
+
+type Pprof struct {
 	listener net.Listener
 	server   *http.Server
 }
 
-func newPprof(p *program) (*pprof, error) {
-	listener, err := net.Listen("tcp", pprofAddress)
+func New(logFunc LogFunc) (*Pprof, error) {
+	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return nil, err
 	}
 
-	pp := &pprof{
+	pp := &Pprof{
 		listener: listener,
 	}
 
@@ -30,17 +32,19 @@ func newPprof(p *program) (*pprof, error) {
 		Handler: http.DefaultServeMux,
 	}
 
-	p.log("[pprof] opened on " + pprofAddress)
+	logFunc("[pprof] opened on " + address)
+
+	go pp.run()
 	return pp, nil
 }
 
-func (pp *pprof) run() {
+func (pp *Pprof) run() {
 	err := pp.server.Serve(pp.listener)
 	if err != http.ErrServerClosed {
 		panic(err)
 	}
 }
 
-func (pp *pprof) close() {
+func (pp *Pprof) Close() {
 	pp.server.Shutdown(context.Background())
 }
