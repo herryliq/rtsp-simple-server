@@ -37,18 +37,17 @@ func newSourceRtsp(p *program, path *path) *sourceRtsp {
 	s := &sourceRtsp{
 		p:         p,
 		path:      path,
+		state:     sourceRtspStateStopped,
 		setState:  make(chan sourceRtspState),
 		terminate: make(chan struct{}),
 		done:      make(chan struct{}),
 	}
 
-	atomic.AddInt64(p.countSourcesRtsp, +1)
+	atomic.AddInt64(p.stats.CountSourcesRtsp, +1)
 
-	if path.conf.SourceOnDemand {
-		s.state = sourceRtspStateStopped
-	} else {
+	if !path.conf.SourceOnDemand {
 		s.state = sourceRtspStateRunning
-		atomic.AddInt64(p.countSourcesRtspRunning, +1)
+		atomic.AddInt64(p.stats.CountSourcesRtspRunning, +1)
 	}
 
 	return s

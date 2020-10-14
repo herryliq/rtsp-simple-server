@@ -158,7 +158,7 @@ func (pa *path) onCheck() {
 			!pa.hasClients() &&
 			time.Since(pa.lastDescribeReq) >= sourceStopAfterDescribePeriod {
 			pa.log("stopping on demand rtsp source (not requested anymore)")
-			atomic.AddInt64(pa.p.countSourcesRtspRunning, -1)
+			atomic.AddInt64(pa.p.stats.CountSourcesRtspRunning, -1)
 			source.state = sourceRtspStateStopped
 			source.setState <- source.state
 		}
@@ -170,7 +170,7 @@ func (pa *path) onCheck() {
 			!pa.hasClients() &&
 			time.Since(pa.lastDescribeReq) >= sourceStopAfterDescribePeriod {
 			pa.log("stopping on demand rtmp source (not requested anymore)")
-			atomic.AddInt64(pa.p.countSourcesRtmpRunning, -1)
+			atomic.AddInt64(pa.p.stats.CountSourcesRtmpRunning, -1)
 			source.state = sourceRtmpStateStopped
 			source.setState <- source.state
 		}
@@ -267,7 +267,7 @@ func (pa *path) onDescribe(client *client) {
 			if source.state == sourceRtspStateStopped {
 				pa.log("starting on demand rtsp source")
 				pa.lastDescribeActivation = time.Now()
-				atomic.AddInt64(pa.p.countSourcesRtspRunning, +1)
+				atomic.AddInt64(pa.p.stats.CountSourcesRtspRunning, +1)
 				source.state = sourceRtspStateRunning
 				source.setState <- source.state
 			}
@@ -277,7 +277,7 @@ func (pa *path) onDescribe(client *client) {
 			if source.state == sourceRtmpStateStopped {
 				pa.log("starting on demand rtmp source")
 				pa.lastDescribeActivation = time.Now()
-				atomic.AddInt64(pa.p.countSourcesRtmpRunning, +1)
+				atomic.AddInt64(pa.p.stats.CountSourcesRtmpRunning, +1)
 				source.state = sourceRtmpStateRunning
 				source.setState <- source.state
 			}

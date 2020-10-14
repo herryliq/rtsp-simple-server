@@ -42,18 +42,17 @@ func newSourceRtmp(p *program, path *path) *sourceRtmp {
 	s := &sourceRtmp{
 		p:         p,
 		path:      path,
+		state:     sourceRtmpStateStopped,
 		setState:  make(chan sourceRtmpState),
 		terminate: make(chan struct{}),
 		done:      make(chan struct{}),
 	}
 
-	atomic.AddInt64(p.countSourcesRtmp, +1)
+	atomic.AddInt64(p.stats.CountSourcesRtmp, +1)
 
-	if path.conf.SourceOnDemand {
-		s.state = sourceRtmpStateStopped
-	} else {
+	if !path.conf.SourceOnDemand {
 		s.state = sourceRtmpStateRunning
-		atomic.AddInt64(p.countSourcesRtmpRunning, +1)
+		atomic.AddInt64(p.stats.CountSourcesRtmpRunning, +1)
 	}
 
 	return s

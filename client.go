@@ -134,7 +134,7 @@ func newClient(p *program, nconn net.Conn) {
 	}
 
 	p.clients[c] = struct{}{}
-	atomic.AddInt64(p.countClients, 1)
+	atomic.AddInt64(p.stats.CountClients, 1)
 	c.log("connected")
 
 	p.clientsWg.Add(1)
@@ -144,15 +144,15 @@ func newClient(p *program, nconn net.Conn) {
 func (c *client) close() {
 	delete(c.p.clients, c)
 
-	atomic.AddInt64(c.p.countClients, -1)
+	atomic.AddInt64(c.p.stats.CountClients, -1)
 
 	switch c.state {
 	case clientStatePlay:
-		atomic.AddInt64(c.p.countReaders, -1)
+		atomic.AddInt64(c.p.stats.CountReaders, -1)
 		c.p.readersMap.remove(c)
 
 	case clientStateRecord:
-		atomic.AddInt64(c.p.countPublishers, -1)
+		atomic.AddInt64(c.p.stats.CountPublishers, -1)
 
 		if c.streamProtocol == gortsplib.StreamProtocolUDP {
 			for _, track := range c.streamTracks {
