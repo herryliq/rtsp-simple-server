@@ -14,6 +14,7 @@ import (
 
 	"github.com/aler9/rtsp-simple-server/conf"
 	"github.com/aler9/rtsp-simple-server/loghandler"
+	"github.com/aler9/rtsp-simple-server/metrics"
 	"github.com/aler9/rtsp-simple-server/pprof"
 	"github.com/aler9/rtsp-simple-server/stats"
 )
@@ -27,7 +28,7 @@ const (
 type program struct {
 	conf             *conf.Conf
 	logHandler       *loghandler.LogHandler
-	metrics          *metrics
+	metrics          *metrics.Metrics
 	pprof            *pprof.Pprof
 	paths            map[string]*path
 	serverUdpRtp     *serverUDP
@@ -103,7 +104,7 @@ func newProgram(args []string) (*program, error) {
 	p.log("rtsp-simple-server %s", Version)
 
 	if conf.Metrics {
-		p.metrics, err = newMetrics(p)
+		p.metrics, err = metrics.New(p.log, p.stats)
 		if err != nil {
 			p.logHandler.Close()
 			return nil, err
@@ -114,6 +115,7 @@ func newProgram(args []string) (*program, error) {
 		p.pprof, err = pprof.New(p.log)
 		if err != nil {
 			p.logHandler.Close()
+			p.metrics.Close()
 			return nil, err
 		}
 	}
@@ -128,6 +130,7 @@ func newProgram(args []string) (*program, error) {
 		p.serverUdpRtp, err = newServerUDP(p, conf.RtpPort, gortsplib.StreamTypeRtp)
 		if err != nil {
 			p.pprof.Close()
+			p.metrics.Close()
 			p.logHandler.Close()
 			return nil, err
 		}
@@ -135,6 +138,7 @@ func newProgram(args []string) (*program, error) {
 		p.serverUdpRtcp, err = newServerUDP(p, conf.RtcpPort, gortsplib.StreamTypeRtcp)
 		if err != nil {
 			p.pprof.Close()
+			p.metrics.Close()
 			p.logHandler.Close()
 			return nil, err
 		}
@@ -143,6 +147,7 @@ func newProgram(args []string) (*program, error) {
 	p.serverTcp, err = newServerTCP(p)
 	if err != nil {
 		p.pprof.Close()
+		p.metrics.Close()
 		p.logHandler.Close()
 		return nil, err
 	}
@@ -163,10 +168,6 @@ func (p *program) log(format string, args ...interface{}) {
 
 func (p *program) run() {
 	defer close(p.done)
-
-	if p.metrics != nil {
-		go p.metrics.run()
-	}
 
 	if p.serverUdpRtp != nil {
 		go p.serverUdpRtp.run()
@@ -343,7 +344,7 @@ outer:
 	p.clientsWg.Wait()
 
 	if p.metrics != nil {
-		p.metrics.close()
+		p.metrics.Close()
 	}
 
 	if p.pprof != nil {

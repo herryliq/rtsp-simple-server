@@ -1,4 +1,4 @@
-package main
+package metrics
 
 import (
 	"context"
@@ -8,27 +8,31 @@ import (
 	"net/http"
 	"sync/atomic"
 	"time"
+
+	"github.com/aler9/rtsp-simple-server/stats"
 )
 
 const (
-	metricsAddress = ":9998"
+	address = ":9998"
 )
 
-type metrics struct {
-	p        *program
+type LogFunc func(string, ...interface{})
+
+type Metrics struct {
+	stats    *stats.Stats
 	listener net.Listener
 	mux      *http.ServeMux
 	server   *http.Server
 }
 
-func newMetrics(p *program) (*metrics, error) {
-	listener, err := net.Listen("tcp", metricsAddress)
+func New(logFunc LogFunc, stats *stats.Stats) (*Metrics, error) {
+	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return nil, err
 	}
 
-	m := &metrics{
-		p:        p,
+	m := &Metrics{
+		stats:    stats,
 		listener: listener,
 	}
 
@@ -39,31 +43,33 @@ func newMetrics(p *program) (*metrics, error) {
 		Handler: m.mux,
 	}
 
-	m.p.log("[metrics] opened on " + metricsAddress)
+	logFunc("[metrics] opened on " + address)
+
+	go m.run()
 	return m, nil
 }
 
-func (m *metrics) run() {
+func (m *Metrics) run() {
 	err := m.server.Serve(m.listener)
 	if err != http.ErrServerClosed {
 		panic(err)
 	}
 }
 
-func (m *metrics) close() {
+func (m *Metrics) Close() {
 	m.server.Shutdown(context.Background())
 }
 
-func (m *metrics) onMetrics(w http.ResponseWriter, req *http.Request) {
+func (m *Metrics) onMetrics(w http.ResponseWriter, req *http.Request) {
 	now := time.Now().UnixNano() / 1000000
 
-	CountClients := atomic.LoadInt64(m.p.stats.CountClients)
-	CountPublishers := atomic.LoadInt64(m.p.stats.CountPublishers)
-	CountReaders := atomic.LoadInt64(m.p.stats.CountReaders)
-	CountSourcesRtsp := atomic.LoadInt64(m.p.stats.CountSourcesRtsp)
-	CountSourcesRtspRunning := atomic.LoadInt64(m.p.stats.CountSourcesRtspRunning)
-	CountSourcesRtmp := atomic.LoadInt64(m.p.stats.CountSourcesRtmp)
-	CountSourcesRtmpRunning := atomic.LoadInt64(m.p.stats.CountSourcesRtmpRunning)
+	CountClients := atomic.LoadInt64(m.stats.CountClients)
+	CountPublishers := atomic.LoadInt64(m.stats.CountPublishers)
+	CountReaders := atomic.LoadInt64(m.stats.CountReaders)
+	CountSourcesRtsp := atomic.LoadInt64(m.stats.CountSourcesRtsp)
+	CountSourcesRtspRunning := atomic.LoadInt64(m.stats.CountSourcesRtspRunning)
+	CountSourcesRtmp := atomic.LoadInt64(m.stats.CountSourcesRtmp)
+	CountSourcesRtmpRunning := atomic.LoadInt64(m.stats.CountSourcesRtmpRunning)
 
 	out := ""
 	out += fmt.Sprintf("rtsp_clients{state=\"idle\"} %d %v\n",
