@@ -18,6 +18,7 @@ import (
 
 	"github.com/aler9/rtsp-simple-server/conf"
 	"github.com/aler9/rtsp-simple-server/externalcmd"
+	"github.com/aler9/rtsp-simple-server/serverudp"
 )
 
 const (
@@ -156,11 +157,11 @@ func (c *client) close() {
 
 		if c.streamProtocol == gortsplib.StreamProtocolUDP {
 			for _, track := range c.streamTracks {
-				addr := makeUDPPublisherAddr(c.ip(), track.rtpPort)
-				c.p.udpPublishersMap.remove(addr)
+				addr := serverudp.MakePublisherAddr(c.ip(), track.rtpPort)
+				c.p.serverUdpRtp.RemovePublisher(addr)
 
-				addr = makeUDPPublisherAddr(c.ip(), track.rtcpPort)
-				c.p.udpPublishersMap.remove(addr)
+				addr = serverudp.MakePublisherAddr(c.ip(), track.rtcpPort)
+				c.p.serverUdpRtcp.RemovePublisher(addr)
 			}
 		}
 
@@ -1064,7 +1065,7 @@ func (c *client) runRecord() bool {
 func (c *client) runRecordUDP() {
 	// open the firewall by sending packets to the counterpart
 	for _, track := range c.streamTracks {
-		c.p.serverUdpRtp.write(
+		c.p.serverUdpRtp.Write(
 			[]byte{0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
 			&net.UDPAddr{
 				IP:   c.ip(),
@@ -1072,7 +1073,7 @@ func (c *client) runRecordUDP() {
 				Port: track.rtpPort,
 			})
 
-		c.p.serverUdpRtcp.write(
+		c.p.serverUdpRtcp.Write(
 			[]byte{0x80, 0xc9, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00},
 			&net.UDPAddr{
 				IP:   c.ip(),
@@ -1134,7 +1135,7 @@ func (c *client) runRecordUDP() {
 		case <-receiverReportTicker.C:
 			for trackId := range c.streamTracks {
 				frame := c.rtcpReceivers[trackId].Report()
-				c.p.serverUdpRtcp.write(frame, &net.UDPAddr{
+				c.p.serverUdpRtcp.Write(frame, &net.UDPAddr{
 					IP:   c.ip(),
 					Zone: c.zone(),
 					Port: c.streamTracks[trackId].rtcpPort,
@@ -1218,4 +1219,15 @@ func (c *client) runRecordTCP() {
 			return
 		}
 	}
+}
+
+func (c *client) OnUdpFramePublished(trackId int, streamType base.StreamType, buf []byte) {
+	atomic.StoreInt64(c.udpLastFrameTimes[trackId], time.Now().Unix())
+
+	c.rtcpReceivers[trackId].OnFrame(streamType, buf)
+
+	c.p.readersMap.forwardFrame(c.path,
+		trackId,
+		streamType,
+		buf)
 }

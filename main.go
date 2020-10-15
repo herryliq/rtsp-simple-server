@@ -16,6 +16,7 @@ import (
 	"github.com/aler9/rtsp-simple-server/metrics"
 	"github.com/aler9/rtsp-simple-server/pprof"
 	"github.com/aler9/rtsp-simple-server/servertcp"
+	"github.com/aler9/rtsp-simple-server/serverudp"
 	"github.com/aler9/rtsp-simple-server/stats"
 )
 
@@ -26,19 +27,18 @@ const (
 )
 
 type program struct {
-	conf             *conf.Conf
-	logHandler       *loghandler.LogHandler
-	metrics          *metrics.Metrics
-	pprof            *pprof.Pprof
-	paths            map[string]*path
-	serverUdpRtp     *serverUDP
-	serverUdpRtcp    *serverUDP
-	serverTcp        *servertcp.ServerTCP
-	clients          map[*client]struct{}
-	clientsWg        sync.WaitGroup
-	udpPublishersMap *udpPublishersMap
-	readersMap       *readersMap
-	stats            *stats.Stats
+	conf          *conf.Conf
+	logHandler    *loghandler.LogHandler
+	metrics       *metrics.Metrics
+	pprof         *pprof.Pprof
+	paths         map[string]*path
+	serverUdpRtp  *serverudp.ServerUDP
+	serverUdpRtcp *serverudp.ServerUDP
+	serverTcp     *servertcp.ServerTCP
+	clients       map[*client]struct{}
+	clientsWg     sync.WaitGroup
+	readersMap    *readersMap
+	stats         *stats.Stats
 
 	clientClose        chan *client
 	clientDescribe     chan clientDescribeReq
@@ -77,7 +77,6 @@ func newProgram(args []string) (*program, error) {
 		conf:               conf,
 		paths:              make(map[string]*path),
 		clients:            make(map[*client]struct{}),
-		udpPublishersMap:   newUdpPublisherMap(),
 		readersMap:         newReadersMap(),
 		stats:              stats.New(),
 		clientClose:        make(chan *client),
@@ -125,7 +124,7 @@ func newProgram(args []string) (*program, error) {
 	}
 
 	if _, ok := conf.ProtocolsParsed[gortsplib.StreamProtocolUDP]; ok {
-		p.serverUdpRtp, err = newServerUDP(p, conf.RtpPort, gortsplib.StreamTypeRtp)
+		p.serverUdpRtp, err = serverudp.New(p.log, p.conf.WriteTimeout, conf.RtpPort, gortsplib.StreamTypeRtp)
 		if err != nil {
 			p.pprof.Close()
 			p.metrics.Close()
@@ -133,7 +132,7 @@ func newProgram(args []string) (*program, error) {
 			return nil, err
 		}
 
-		p.serverUdpRtcp, err = newServerUDP(p, conf.RtcpPort, gortsplib.StreamTypeRtcp)
+		p.serverUdpRtcp, err = serverudp.New(p.log, p.conf.WriteTimeout, conf.RtcpPort, gortsplib.StreamTypeRtcp)
 		if err != nil {
 			p.pprof.Close()
 			p.metrics.Close()
@@ -147,6 +146,12 @@ func newProgram(args []string) (*program, error) {
 		p.pprof.Close()
 		p.metrics.Close()
 		p.logHandler.Close()
+		if p.serverUdpRtp != nil {
+			p.serverUdpRtp.Close()
+		}
+		if p.serverUdpRtcp != nil {
+			p.serverUdpRtcp.Close()
+		}
 		return nil, err
 	}
 
@@ -166,14 +171,6 @@ func (p *program) log(format string, args ...interface{}) {
 
 func (p *program) run() {
 	defer close(p.done)
-
-	if p.serverUdpRtp != nil {
-		go p.serverUdpRtp.run()
-	}
-
-	if p.serverUdpRtcp != nil {
-		go p.serverUdpRtcp.run()
-	}
 
 	for _, p := range p.paths {
 		p.onInit()
@@ -254,19 +251,11 @@ outer:
 
 			if client.streamProtocol == gortsplib.StreamProtocolUDP {
 				for trackId, track := range client.streamTracks {
-					addr := makeUDPPublisherAddr(client.ip(), track.rtpPort)
-					p.udpPublishersMap.add(addr, &udpPublisher{
-						client:     client,
-						trackId:    trackId,
-						streamType: gortsplib.StreamTypeRtp,
-					})
+					addr := serverudp.MakePublisherAddr(client.ip(), track.rtpPort)
+					p.serverUdpRtp.AddPublisher(addr, client, trackId)
 
-					addr = makeUDPPublisherAddr(client.ip(), track.rtcpPort)
-					p.udpPublishersMap.add(addr, &udpPublisher{
-						client:     client,
-						trackId:    trackId,
-						streamType: gortsplib.StreamTypeRtcp,
-					})
+					addr = serverudp.MakePublisherAddr(client.ip(), track.rtcpPort)
+					p.serverUdpRtcp.AddPublisher(addr, client, trackId)
 				}
 			}
 
@@ -315,7 +304,6 @@ outer:
 		}
 	}()
 
-	p.udpPublishersMap.clear()
 	p.readersMap.clear()
 
 	for _, p := range p.paths {
@@ -325,11 +313,11 @@ outer:
 	p.serverTcp.Close()
 
 	if p.serverUdpRtcp != nil {
-		p.serverUdpRtcp.close()
+		p.serverUdpRtcp.Close()
 	}
 
 	if p.serverUdpRtp != nil {
-		p.serverUdpRtp.close()
+		p.serverUdpRtp.Close()
 	}
 
 	for c := range p.clients {

@@ -23,8 +23,8 @@ func New(logFunc LogFunc, port int) (*ServerTCP, error) {
 	}
 
 	s := &ServerTCP{
-		listener: listener,
-		done:     make(chan struct{}),
+		listener:  listener,
+		done:      make(chan struct{}),
 		NewClient: make(chan net.Conn),
 	}
 

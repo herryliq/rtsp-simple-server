@@ -63,75 +63,6 @@ func removeQueryFromPath(path string) string {
 	return path
 }
 
-type udpPublisherAddr struct {
-	ip   [net.IPv6len]byte // use a fixed-size array to enable the equality operator
-	port int
-}
-
-func makeUDPPublisherAddr(ip net.IP, port int) udpPublisherAddr {
-	ret := udpPublisherAddr{
-		port: port,
-	}
-
-	if len(ip) == net.IPv4len {
-		copy(ret.ip[0:], []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff}) // v4InV6Prefix
-		copy(ret.ip[12:], ip)
-	} else {
-		copy(ret.ip[:], ip)
-	}
-
-	return ret
-}
-
-type udpPublisher struct {
-	client     *client
-	trackId    int
-	streamType gortsplib.StreamType
-}
-
-type udpPublishersMap struct {
-	mutex sync.RWMutex
-	ma    map[udpPublisherAddr]*udpPublisher
-}
-
-func newUdpPublisherMap() *udpPublishersMap {
-	return &udpPublishersMap{
-		ma: make(map[udpPublisherAddr]*udpPublisher),
-	}
-}
-
-func (m *udpPublishersMap) clear() {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-
-	m.ma = make(map[udpPublisherAddr]*udpPublisher)
-}
-
-func (m *udpPublishersMap) add(addr udpPublisherAddr, pub *udpPublisher) {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-
-	m.ma[addr] = pub
-}
-
-func (m *udpPublishersMap) remove(addr udpPublisherAddr) {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-
-	delete(m.ma, addr)
-}
-
-func (m *udpPublishersMap) get(addr udpPublisherAddr) *udpPublisher {
-	m.mutex.RLock()
-	defer m.mutex.RUnlock()
-
-	el, ok := m.ma[addr]
-	if !ok {
-		return nil
-	}
-	return el
-}
-
 type readersMap struct {
 	mutex sync.RWMutex
 	ma    map[*client]struct{}
@@ -180,14 +111,14 @@ func (m *readersMap) forwardFrame(path *path, trackId int, streamType gortsplib.
 
 		if c.streamProtocol == gortsplib.StreamProtocolUDP {
 			if streamType == gortsplib.StreamTypeRtp {
-				c.p.serverUdpRtp.write(frame, &net.UDPAddr{
+				c.p.serverUdpRtp.Write(frame, &net.UDPAddr{
 					IP:   c.ip(),
 					Zone: c.zone(),
 					Port: track.rtpPort,
 				})
 
 			} else {
-				c.p.serverUdpRtcp.write(frame, &net.UDPAddr{
+				c.p.serverUdpRtcp.Write(frame, &net.UDPAddr{
 					IP:   c.ip(),
 					Zone: c.zone(),
 					Port: track.rtcpPort,
