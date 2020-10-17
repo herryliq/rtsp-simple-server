@@ -40,19 +40,17 @@ type program struct {
 	clientsWg     sync.WaitGroup
 	stats         *stats.Stats
 
-	clientNew          chan net.Conn
-	clientClose        chan *client
-	clientDescribe     chan clientDescribeReq
-	clientAnnounce     chan clientAnnounceReq
-	clientSetupPlay    chan clientSetupPlayReq
-	clientPlay         chan *client
-	clientRecord       chan *client
-	sourceRtspReady    chan *sourceRtsp
-	sourceRtspNotReady chan *sourceRtsp
-	sourceRtmpReady    chan *sourceRtmp
-	sourceRtmpNotReady chan *sourceRtmp
-	terminate          chan struct{}
-	done               chan struct{}
+	clientNew       chan net.Conn
+	clientClose     chan *client
+	clientDescribe  chan clientDescribeReq
+	clientAnnounce  chan clientAnnounceReq
+	clientSetupPlay chan clientSetupPlayReq
+	clientPlay      chan *client
+	clientRecord    chan *client
+	sourceReady     chan *path
+	sourceNotReady  chan *path
+	terminate       chan struct{}
+	done            chan struct{}
 }
 
 func newProgram(args []string) (*program, error) {
@@ -75,23 +73,21 @@ func newProgram(args []string) (*program, error) {
 	}
 
 	p := &program{
-		conf:               conf,
-		paths:              make(map[string]*path),
-		clients:            make(map[*client]struct{}),
-		stats:              stats.New(),
-		clientNew:          make(chan net.Conn),
-		clientClose:        make(chan *client),
-		clientDescribe:     make(chan clientDescribeReq),
-		clientAnnounce:     make(chan clientAnnounceReq),
-		clientSetupPlay:    make(chan clientSetupPlayReq),
-		clientPlay:         make(chan *client),
-		clientRecord:       make(chan *client),
-		sourceRtspReady:    make(chan *sourceRtsp),
-		sourceRtspNotReady: make(chan *sourceRtsp),
-		sourceRtmpReady:    make(chan *sourceRtmp),
-		sourceRtmpNotReady: make(chan *sourceRtmp),
-		terminate:          make(chan struct{}),
-		done:               make(chan struct{}),
+		conf:            conf,
+		paths:           make(map[string]*path),
+		clients:         make(map[*client]struct{}),
+		stats:           stats.New(),
+		clientNew:       make(chan net.Conn),
+		clientClose:     make(chan *client),
+		clientDescribe:  make(chan clientDescribeReq),
+		clientAnnounce:  make(chan clientAnnounceReq),
+		clientSetupPlay: make(chan clientSetupPlayReq),
+		clientPlay:      make(chan *client),
+		clientRecord:    make(chan *client),
+		sourceReady:     make(chan *path),
+		sourceNotReady:  make(chan *path),
+		terminate:       make(chan struct{}),
+		done:            make(chan struct{}),
 	}
 
 	p.logHandler, err = loghandler.New(conf.LogDestinationsParsed, conf.LogFile)
@@ -263,17 +259,11 @@ outer:
 
 			client.path.onSourceSetReady()
 
-		case s := <-p.sourceRtspReady:
-			s.path.onSourceSetReady()
+		case pa := <-p.sourceReady:
+			pa.onSourceSetReady()
 
-		case s := <-p.sourceRtspNotReady:
-			s.path.onSourceSetNotReady()
-
-		case s := <-p.sourceRtmpReady:
-			s.path.onSourceSetReady()
-
-		case s := <-p.sourceRtmpNotReady:
-			s.path.onSourceSetNotReady()
+		case pa := <-p.sourceNotReady:
+			pa.onSourceSetNotReady()
 
 		case <-p.terminate:
 			break outer
@@ -297,10 +287,8 @@ outer:
 				req.res <- fmt.Errorf("terminated")
 			case <-p.clientPlay:
 			case <-p.clientRecord:
-			case <-p.sourceRtspReady:
-			case <-p.sourceRtspNotReady:
-			case <-p.sourceRtmpReady:
-			case <-p.sourceRtmpNotReady:
+			case <-p.sourceReady:
+			case <-p.sourceNotReady:
 			}
 		}
 	}()
@@ -335,14 +323,15 @@ outer:
 
 	p.logHandler.Close()
 
+	close(p.clientNew)
 	close(p.clientClose)
 	close(p.clientDescribe)
 	close(p.clientAnnounce)
 	close(p.clientSetupPlay)
 	close(p.clientPlay)
 	close(p.clientRecord)
-	close(p.sourceRtspReady)
-	close(p.sourceRtspNotReady)
+	close(p.sourceReady)
+	close(p.sourceNotReady)
 }
 
 func (p *program) close() {

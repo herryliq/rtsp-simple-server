@@ -181,7 +181,7 @@ func (c *client) log(format string, args ...interface{}) {
 	c.p.log("[client %s] "+format, append([]interface{}{c.conn.NetConn().RemoteAddr().String()}, args...)...)
 }
 
-func (c *client) isSource() {}
+func (c *client) IsSource() {}
 
 func (c *client) ip() net.IP {
 	return c.conn.NetConn().RemoteAddr().(*net.TCPAddr).IP

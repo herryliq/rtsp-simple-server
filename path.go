@@ -6,9 +6,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/aler9/gortsplib"
+
 	"github.com/aler9/rtsp-simple-server/conf"
 	"github.com/aler9/rtsp-simple-server/externalcmd"
 	"github.com/aler9/rtsp-simple-server/readersmap"
+	"github.com/aler9/rtsp-simple-server/sourcertmp"
+	"github.com/aler9/rtsp-simple-server/sourcertsp"
 )
 
 const (
@@ -17,9 +21,9 @@ const (
 	onDemandCmdStopAfterDescribePeriod = 10 * time.Second
 )
 
-// a source can be a client, a sourceRtsp or a sourceRtmp
+// a source can be a client, a sourcertsp.Source or a sourcertmp.Source
 type source interface {
-	isSource()
+	IsSource()
 }
 
 type path struct {
@@ -46,14 +50,55 @@ func newPath(p *program, name string, conf *conf.PathConf) *path {
 	}
 
 	if strings.HasPrefix(conf.Source, "rtsp://") {
-		s := newSourceRtsp(p, pa, func(s *sourceRtsp) { s.p.sourceRtspReady <- s },
-			func(s *sourceRtsp) { s.p.sourceRtspReady <- s })
+		state := sourcertsp.StateStopped
+		if !conf.SourceOnDemand {
+			state = sourcertsp.StateRunning
+		}
+
+		s := sourcertsp.New(
+			conf.Source,
+			conf.SourceProtocolParsed,
+			pa.readers,
+			pa.log,
+			p.conf.ReadTimeout,
+			p.conf.WriteTimeout,
+			state,
+			func(s *sourcertsp.Source, tracks gortsplib.Tracks) {
+				pa.sourceSdp = tracks.Write()
+				pa.sourceTrackCount = len(tracks)
+				p.sourceReady <- pa
+			},
+			func(s *sourcertsp.Source) { p.sourceNotReady <- pa })
 		pa.source = s
 
+		atomic.AddInt64(p.stats.CountSourcesRtsp, +1)
+		if !pa.conf.SourceOnDemand {
+			atomic.AddInt64(p.stats.CountSourcesRtspRunning, +1)
+		}
+
 	} else if strings.HasPrefix(conf.Source, "rtmp://") {
-		s := newSourceRtmp(p, pa, func(s *sourceRtmp) { s.p.sourceRtmpReady <- s },
-			func(s *sourceRtmp) { s.p.sourceRtmpReady <- s })
+		state := sourcertmp.StateStopped
+		if !conf.SourceOnDemand {
+			state = sourcertmp.StateRunning
+		}
+
+		s := sourcertmp.New(
+			conf.Source,
+			pa.readers,
+			pa.log,
+			state,
+			func(s *sourcertmp.Source, tracks gortsplib.Tracks) {
+				pa.sourceSdp = tracks.Write()
+				pa.sourceTrackCount = len(tracks)
+				p.sourceReady <- pa
+			},
+			func(s *sourcertmp.Source) { p.sourceNotReady <- pa })
 		pa.source = s
+
+		atomic.AddInt64(p.stats.CountSourcesRtmp, +1)
+		if !pa.conf.SourceOnDemand {
+			atomic.AddInt64(p.stats.CountSourcesRtmpRunning, +1)
+		}
 	}
 
 	return pa
@@ -64,11 +109,11 @@ func (pa *path) log(format string, args ...interface{}) {
 }
 
 func (pa *path) start() {
-	if source, ok := pa.source.(*sourceRtsp); ok {
-		go source.run(source.state)
+	if source, ok := pa.source.(*sourcertsp.Source); ok {
+		source.Start()
 
-	} else if source, ok := pa.source.(*sourceRtmp); ok {
-		go source.run(source.state)
+	} else if source, ok := pa.source.(*sourcertmp.Source); ok {
+		source.Start()
 	}
 
 	if pa.conf.RunOnInit != "" {
@@ -85,13 +130,11 @@ func (pa *path) start() {
 func (pa *path) close() {
 	delete(pa.p.paths, pa.name)
 
-	if source, ok := pa.source.(*sourceRtsp); ok {
-		close(source.terminate)
-		<-source.done
+	if source, ok := pa.source.(*sourcertsp.Source); ok {
+		source.Close()
 
-	} else if source, ok := pa.source.(*sourceRtmp); ok {
-		close(source.terminate)
-		<-source.done
+	} else if source, ok := pa.source.(*sourcertmp.Source); ok {
+		source.Close()
 	}
 
 	if pa.onInitCmd != nil {
@@ -159,25 +202,25 @@ func (pa *path) onCheck() {
 	}
 
 	// stop on demand rtsp source if needed
-	if source, ok := pa.source.(*sourceRtsp); ok {
+	if source, ok := pa.source.(*sourcertsp.Source); ok {
 		if pa.conf.SourceOnDemand &&
-			source.state == sourceRtspStateRunning &&
+			source.State() == sourcertsp.StateRunning &&
 			!pa.hasClients() &&
 			time.Since(pa.lastDescribeReq) >= sourceStopAfterDescribePeriod {
 			pa.log("stopping on demand rtsp source (not requested anymore)")
 			atomic.AddInt64(pa.p.stats.CountSourcesRtspRunning, -1)
-			source.setState(sourceRtspStateStopped)
+			source.SetState(sourcertsp.StateStopped)
 		}
 
 		// stop on demand rtmp source if needed
-	} else if source, ok := pa.source.(*sourceRtmp); ok {
+	} else if source, ok := pa.source.(*sourcertmp.Source); ok {
 		if pa.conf.SourceOnDemand &&
-			source.state == sourceRtmpStateRunning &&
+			source.State() == sourcertmp.StateRunning &&
 			!pa.hasClients() &&
 			time.Since(pa.lastDescribeReq) >= sourceStopAfterDescribePeriod {
 			pa.log("stopping on demand rtmp source (not requested anymore)")
 			atomic.AddInt64(pa.p.stats.CountSourcesRtmpRunning, -1)
-			source.setState(sourceRtmpStateStopped)
+			source.SetState(sourcertmp.StateStopped)
 		}
 	}
 
@@ -267,21 +310,21 @@ func (pa *path) onDescribe(client *client) {
 		// publisher was found but is not ready: put the client on hold
 	} else if !pa.sourceReady {
 		// start rtsp source if needed
-		if source, ok := pa.source.(*sourceRtsp); ok {
-			if source.state == sourceRtspStateStopped {
+		if source, ok := pa.source.(*sourcertsp.Source); ok {
+			if source.State() == sourcertsp.StateStopped {
 				pa.log("starting on demand rtsp source")
 				pa.lastDescribeActivation = time.Now()
 				atomic.AddInt64(pa.p.stats.CountSourcesRtspRunning, +1)
-				source.setState(sourceRtspStateRunning)
+				source.SetState(sourcertsp.StateRunning)
 			}
 
 			// start rtmp source if needed
-		} else if source, ok := pa.source.(*sourceRtmp); ok {
-			if source.state == sourceRtmpStateStopped {
+		} else if source, ok := pa.source.(*sourcertmp.Source); ok {
+			if source.State() == sourcertmp.StateStopped {
 				pa.log("starting on demand rtmp source")
 				pa.lastDescribeActivation = time.Now()
 				atomic.AddInt64(pa.p.stats.CountSourcesRtmpRunning, +1)
-				source.setState(sourceRtmpStateRunning)
+				source.SetState(sourcertmp.StateRunning)
 			}
 		}
 

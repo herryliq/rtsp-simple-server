@@ -1,4 +1,4 @@
-package main
+package sourcertmp
 
 import (
 	"fmt"
@@ -12,68 +12,85 @@ import (
 	"github.com/notedit/rtmp/av"
 	"github.com/notedit/rtmp/codec/h264"
 	"github.com/notedit/rtmp/format/rtmp"
+
+	"github.com/aler9/rtsp-simple-server/readersmap"
 )
 
 const (
-	sourceRtmpRetryInterval = 5 * time.Second
+	retryInterval = 5 * time.Second
 )
 
-type OnRtmpReadyFunc func(*sourceRtmp)
+type LogFunc func(string, ...interface{})
 
-type OnRtmpNotReadyFunc func(*sourceRtmp)
+type OnReadyFunc func(*Source, gortsplib.Tracks)
 
-type sourceRtmpState int
+type OnNotReadyFunc func(*Source)
+
+type State int
 
 const (
-	sourceRtmpStateStopped sourceRtmpState = iota
-	sourceRtmpStateRunning
+	StateStopped State = iota
+	StateRunning
 )
 
-type sourceRtmp struct {
-	p            *program
-	path         *path
-	state        sourceRtmpState
+type Source struct {
+	ur           string
+	readers      *readersmap.ReadersMap
+	logFunc      LogFunc
+	state        State
 	innerRunning bool
-	onReady      OnRtmpReadyFunc
-	onNotReady   OnRtmpNotReadyFunc
+	onReady      OnReadyFunc
+	onNotReady   OnNotReadyFunc
 
 	innerTerminate chan struct{}
 	innerDone      chan struct{}
-	stateChange    chan sourceRtmpState
+	stateChange    chan State
 	terminate      chan struct{}
 	done           chan struct{}
 }
 
-func newSourceRtmp(p *program, path *path, onReady OnRtmpReadyFunc, onNotReady OnRtmpNotReadyFunc) *sourceRtmp {
-	s := &sourceRtmp{
-		p:           p,
-		path:        path,
-		state:       sourceRtmpStateStopped,
+func New(ur string,
+	readers *readersmap.ReadersMap,
+	logFunc LogFunc,
+	state State,
+	onReady OnReadyFunc,
+	onNotReady OnNotReadyFunc) *Source {
+	s := &Source{
+		ur:          ur,
+		readers:     readers,
+		logFunc:     logFunc,
+		state:       state,
 		onReady:     onReady,
 		onNotReady:  onNotReady,
-		stateChange: make(chan sourceRtmpState),
+		stateChange: make(chan State),
 		terminate:   make(chan struct{}),
 		done:        make(chan struct{}),
-	}
-
-	atomic.AddInt64(p.stats.CountSourcesRtmp, +1)
-
-	if !path.conf.SourceOnDemand {
-		s.state = sourceRtmpStateRunning
-		atomic.AddInt64(p.stats.CountSourcesRtmpRunning, +1)
 	}
 
 	return s
 }
 
-func (s *sourceRtmp) isSource() {}
+func (s *Source) IsSource() {}
 
-func (s *sourceRtmp) setState(state sourceRtmpState) {
+func (s *Source) State() State {
+	return s.state
+}
+
+func (s *Source) SetState(state State) {
 	s.state = state
 	s.stateChange <- s.state
 }
 
-func (s *sourceRtmp) run(initialState sourceRtmpState) {
+func (s *Source) Start() {
+	go s.run(s.state)
+}
+
+func (s *Source) Close() {
+	close(s.terminate)
+	<-s.done
+}
+
+func (s *Source) run(initialState State) {
 	defer close(s.done)
 
 	s.applyState(initialState)
@@ -97,10 +114,10 @@ outer:
 	close(s.stateChange)
 }
 
-func (s *sourceRtmp) applyState(state sourceRtmpState) {
-	if state == sourceRtmpStateRunning {
+func (s *Source) applyState(state State) {
+	if state == StateRunning {
 		if !s.innerRunning {
-			s.path.log("rtmp source started")
+			s.logFunc("rtmp source started")
 			s.innerRunning = true
 			s.innerTerminate = make(chan struct{})
 			s.innerDone = make(chan struct{})
@@ -111,12 +128,12 @@ func (s *sourceRtmp) applyState(state sourceRtmpState) {
 			close(s.innerTerminate)
 			<-s.innerDone
 			s.innerRunning = false
-			s.path.log("rtmp source stopped")
+			s.logFunc("rtmp source stopped")
 		}
 	}
 }
 
-func (s *sourceRtmp) runInner() {
+func (s *Source) runInner() {
 	defer close(s.innerDone)
 
 outer:
@@ -126,7 +143,7 @@ outer:
 			break outer
 		}
 
-		t := time.NewTimer(sourceRtmpRetryInterval)
+		t := time.NewTimer(retryInterval)
 		defer t.Stop()
 
 		select {
@@ -137,8 +154,8 @@ outer:
 	}
 }
 
-func (s *sourceRtmp) runInnerInner() bool {
-	s.path.log("connecting to rtmp source")
+func (s *Source) runInnerInner() bool {
+	s.logFunc("connecting to rtmp source")
 
 	var conn *rtmp.Conn
 	var nconn net.Conn
@@ -146,7 +163,7 @@ func (s *sourceRtmp) runInnerInner() bool {
 	dialDone := make(chan struct{}, 1)
 	go func() {
 		defer close(dialDone)
-		conn, nconn, err = rtmp.NewClient().Dial(s.path.conf.Source, rtmp.PrepareReading)
+		conn, nconn, err = rtmp.NewClient().Dial(s.ur, rtmp.PrepareReading)
 	}()
 
 	select {
@@ -156,7 +173,7 @@ func (s *sourceRtmp) runInnerInner() bool {
 	}
 
 	if err != nil {
-		s.path.log("rtmp source ERR: %s", err)
+		s.logFunc("rtmp source ERR: %s", err)
 		return true
 	}
 
@@ -214,7 +231,7 @@ func (s *sourceRtmp) runInnerInner() bool {
 	}
 
 	if err != nil {
-		s.path.log("rtmp source ERR: %s", err)
+		s.logFunc("rtmp source ERR: %s", err)
 		return true
 	}
 
@@ -227,13 +244,13 @@ func (s *sourceRtmp) runInnerInner() bool {
 	if h264Sps != nil {
 		videoTrack, err = gortsplib.NewTrackH264(len(tracks), h264Sps, h264Pps)
 		if err != nil {
-			s.path.log("rtmp source ERR: %s", err)
+			s.logFunc("rtmp source ERR: %s", err)
 			return true
 		}
 
 		h264Encoder, err = rtph264.NewEncoder(uint8(len(tracks)))
 		if err != nil {
-			s.path.log("rtmp source ERR: %s", err)
+			s.logFunc("rtmp source ERR: %s", err)
 			return true
 		}
 
@@ -243,13 +260,13 @@ func (s *sourceRtmp) runInnerInner() bool {
 	if aacConfig != nil {
 		audioTrack, err = gortsplib.NewTrackAac(len(tracks), aacConfig)
 		if err != nil {
-			s.path.log("rtmp source ERR: %s", err)
+			s.logFunc("rtmp source ERR: %s", err)
 			return true
 		}
 
 		aacEncoder, err = rtpaac.NewEncoder(uint8(len(tracks)), aacConfig)
 		if err != nil {
-			s.path.log("rtmp source ERR: %s", err)
+			s.logFunc("rtmp source ERR: %s", err)
 			return true
 		}
 
@@ -257,15 +274,12 @@ func (s *sourceRtmp) runInnerInner() bool {
 	}
 
 	if len(tracks) == 0 {
-		s.path.log("rtmp source ERR: no tracks found")
+		s.logFunc("rtmp source ERR: no tracks found")
 		return true
 	}
 
-	s.path.sourceSdp = tracks.Write()
-	s.path.sourceTrackCount = len(tracks)
-
-	s.p.sourceRtmpReady <- s
-	s.path.log("rtmp source ready")
+	s.onReady(s, tracks)
+	s.logFunc("rtmp source ready")
 
 	readDone := make(chan error)
 	go func() {
@@ -298,7 +312,7 @@ func (s *sourceRtmp) runInnerInner() bool {
 				}
 
 				for _, f := range frames {
-					s.path.readers.ForwardFrame(videoTrack.Id, gortsplib.StreamTypeRtp, f)
+					s.readers.ForwardFrame(videoTrack.Id, gortsplib.StreamTypeRtp, f)
 				}
 
 			case av.AAC:
@@ -314,7 +328,7 @@ func (s *sourceRtmp) runInnerInner() bool {
 				}
 
 				for _, f := range frames {
-					s.path.readers.ForwardFrame(audioTrack.Id, gortsplib.StreamTypeRtp, f)
+					s.readers.ForwardFrame(audioTrack.Id, gortsplib.StreamTypeRtp, f)
 				}
 
 			default:
@@ -337,14 +351,14 @@ outer:
 
 		case err := <-readDone:
 			nconn.Close()
-			s.path.log("rtmp source ERR: %s", err)
+			s.logFunc("rtmp source ERR: %s", err)
 			ret = true
 			break outer
 		}
 	}
 
-	s.p.sourceRtmpNotReady <- s
-	s.path.log("rtmp source not ready")
+	s.onNotReady(s)
+	s.logFunc("rtmp source not ready")
 
 	return ret
 }

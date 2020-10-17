@@ -66,7 +66,6 @@ func checkPathName(name string) error {
 type PathConf struct {
 	Regexp               *regexp.Regexp           `yaml:"-"`
 	Source               string                   `yaml:"source"`
-	SourceUrl            *url.URL                 `yaml:"-"`
 	SourceProtocol       string                   `yaml:"sourceProtocol"`
 	SourceProtocolParsed gortsplib.StreamProtocol `yaml:"-"`
 	SourceOnDemand       bool                     `yaml:"sourceOnDemand"`
@@ -267,16 +266,13 @@ func Load(fpath string) (*Conf, error) {
 				return nil, fmt.Errorf("a path with a regular expression (or path 'all') cannot have a RTSP source; use another path")
 			}
 
-			pconf.SourceUrl, err = url.Parse(pconf.Source)
+			u, err := url.Parse(pconf.Source)
 			if err != nil {
 				return nil, fmt.Errorf("'%s' is not a valid url", pconf.Source)
 			}
-			if pconf.SourceUrl.Port() == "" {
-				pconf.SourceUrl.Host += ":554"
-			}
-			if pconf.SourceUrl.User != nil {
-				pass, _ := pconf.SourceUrl.User.Password()
-				user := pconf.SourceUrl.User.Username()
+			if u.User != nil {
+				pass, _ := u.User.Password()
+				user := u.User.Username()
 				if user != "" && pass == "" ||
 					user == "" && pass != "" {
 					fmt.Errorf("username and password must be both provided")
@@ -302,12 +298,17 @@ func Load(fpath string) (*Conf, error) {
 				return nil, fmt.Errorf("a path with a regular expression (or path 'all') cannot have a RTMP source; use another path")
 			}
 
-			pconf.SourceUrl, err = url.Parse(pconf.Source)
+			u, err := url.Parse(pconf.Source)
 			if err != nil {
 				return nil, fmt.Errorf("'%s' is not a valid url", pconf.Source)
 			}
-			if pconf.SourceUrl.Port() == "" {
-				pconf.SourceUrl.Host += ":1935"
+			if u.User != nil {
+				pass, _ := u.User.Password()
+				user := u.User.Username()
+				if user != "" && pass == "" ||
+					user == "" && pass != "" {
+					fmt.Errorf("username and password must be both provided")
+				}
 			}
 
 		} else if pconf.Source == "record" {
