@@ -12,6 +12,10 @@ const (
 	sourceRtspRetryInterval = 5 * time.Second
 )
 
+type OnRtspReadyFunc func(*sourceRtsp)
+
+type OnRtspNotReadyFunc func(*sourceRtsp)
+
 type sourceRtspState int
 
 const (
@@ -25,22 +29,26 @@ type sourceRtsp struct {
 	state        sourceRtspState
 	tracks       []*gortsplib.Track
 	innerRunning bool
+	onReady      OnRtspReadyFunc
+	onNotReady   OnRtspNotReadyFunc
 
 	innerTerminate chan struct{}
 	innerDone      chan struct{}
-	setState       chan sourceRtspState
+	stateChange    chan sourceRtspState
 	terminate      chan struct{}
 	done           chan struct{}
 }
 
-func newSourceRtsp(p *program, path *path) *sourceRtsp {
+func newSourceRtsp(p *program, path *path, onReady OnRtspReadyFunc, onNotReady OnRtspNotReadyFunc) *sourceRtsp {
 	s := &sourceRtsp{
-		p:         p,
-		path:      path,
-		state:     sourceRtspStateStopped,
-		setState:  make(chan sourceRtspState),
-		terminate: make(chan struct{}),
-		done:      make(chan struct{}),
+		p:           p,
+		path:        path,
+		state:       sourceRtspStateStopped,
+		onReady:     onReady,
+		onNotReady:  onNotReady,
+		stateChange: make(chan sourceRtspState),
+		terminate:   make(chan struct{}),
+		done:        make(chan struct{}),
 	}
 
 	atomic.AddInt64(p.stats.CountSourcesRtsp, +1)
@@ -55,6 +63,11 @@ func newSourceRtsp(p *program, path *path) *sourceRtsp {
 
 func (s *sourceRtsp) isSource() {}
 
+func (s *sourceRtsp) setState(state sourceRtspState) {
+	s.state = state
+	s.stateChange <- s.state
+}
+
 func (s *sourceRtsp) run(initialState sourceRtspState) {
 	defer close(s.done)
 
@@ -63,7 +76,7 @@ func (s *sourceRtsp) run(initialState sourceRtspState) {
 outer:
 	for {
 		select {
-		case state := <-s.setState:
+		case state := <-s.stateChange:
 			s.applyState(state)
 
 		case <-s.terminate:
@@ -76,7 +89,7 @@ outer:
 		<-s.innerDone
 	}
 
-	close(s.setState)
+	close(s.stateChange)
 }
 
 func (s *sourceRtsp) applyState(state sourceRtspState) {
@@ -189,7 +202,7 @@ func (s *sourceRtsp) runUDP(conn *gortsplib.ConnClient) bool {
 		return true
 	}
 
-	s.p.sourceRtspReady <- s
+	s.onReady(s)
 	s.path.log("rtsp source ready")
 
 	var wg sync.WaitGroup
@@ -206,7 +219,7 @@ func (s *sourceRtsp) runUDP(conn *gortsplib.ConnClient) bool {
 					break
 				}
 
-				s.p.readersMap.forwardFrame(s.path, trackId,
+				s.path.readers.ForwardFrame(trackId,
 					gortsplib.StreamTypeRtp, buf)
 			}
 		}(trackId)
@@ -224,7 +237,7 @@ func (s *sourceRtsp) runUDP(conn *gortsplib.ConnClient) bool {
 					break
 				}
 
-				s.p.readersMap.forwardFrame(s.path, trackId,
+				s.path.readers.ForwardFrame(trackId,
 					gortsplib.StreamTypeRtcp, buf)
 			}
 		}(trackId)
@@ -279,7 +292,7 @@ func (s *sourceRtsp) runTCP(conn *gortsplib.ConnClient) bool {
 		return true
 	}
 
-	s.p.sourceRtspReady <- s
+	s.onReady(s)
 	s.path.log("rtsp source ready")
 
 	tcpConnDone := make(chan error)
@@ -291,7 +304,7 @@ func (s *sourceRtsp) runTCP(conn *gortsplib.ConnClient) bool {
 				return
 			}
 
-			s.p.readersMap.forwardFrame(s.path, trackId, streamType, content)
+			s.path.readers.ForwardFrame(trackId, streamType, content)
 		}
 	}()
 

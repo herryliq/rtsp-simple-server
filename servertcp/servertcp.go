@@ -6,15 +6,16 @@ import (
 
 type LogFunc func(string, ...interface{})
 
+type OnNewConnFunc func(net.Conn)
+
 type ServerTCP struct {
-	listener *net.TCPListener
+	onNewConn OnNewConnFunc
+	listener  *net.TCPListener
 
 	done chan struct{}
-
-	NewClient chan net.Conn
 }
 
-func New(logFunc LogFunc, port int) (*ServerTCP, error) {
+func New(logFunc LogFunc, port int, onNewConn OnNewConnFunc) (*ServerTCP, error) {
 	listener, err := net.ListenTCP("tcp", &net.TCPAddr{
 		Port: port,
 	})
@@ -23,9 +24,9 @@ func New(logFunc LogFunc, port int) (*ServerTCP, error) {
 	}
 
 	s := &ServerTCP{
+		onNewConn: onNewConn,
 		listener:  listener,
 		done:      make(chan struct{}),
-		NewClient: make(chan net.Conn),
 	}
 
 	logFunc("[TCP server] opened on :%d", port)
@@ -43,17 +44,11 @@ func (s *ServerTCP) run() {
 			break
 		}
 
-		s.NewClient <- conn
+		s.onNewConn(conn)
 	}
-
-	close(s.NewClient)
 }
 
 func (s *ServerTCP) Close() {
-	go func() {
-		for range s.NewClient {
-		}
-	}()
 	s.listener.Close()
 	<-s.done
 }

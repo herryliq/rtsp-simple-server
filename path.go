@@ -8,6 +8,7 @@ import (
 
 	"github.com/aler9/rtsp-simple-server/conf"
 	"github.com/aler9/rtsp-simple-server/externalcmd"
+	"github.com/aler9/rtsp-simple-server/readersmap"
 )
 
 const (
@@ -31,23 +32,27 @@ type path struct {
 	sourceSdp              []byte
 	lastDescribeReq        time.Time
 	lastDescribeActivation time.Time
+	readers                *readersmap.ReadersMap
 	onInitCmd              *externalcmd.ExternalCmd
 	onDemandCmd            *externalcmd.ExternalCmd
 }
 
 func newPath(p *program, name string, conf *conf.PathConf) *path {
 	pa := &path{
-		p:    p,
-		name: name,
-		conf: conf,
+		p:       p,
+		name:    name,
+		conf:    conf,
+		readers: readersmap.New(),
 	}
 
 	if strings.HasPrefix(conf.Source, "rtsp://") {
-		s := newSourceRtsp(p, pa)
+		s := newSourceRtsp(p, pa, func(s *sourceRtsp) { s.p.sourceRtspReady <- s },
+			func(s *sourceRtsp) { s.p.sourceRtspReady <- s })
 		pa.source = s
 
 	} else if strings.HasPrefix(conf.Source, "rtmp://") {
-		s := newSourceRtmp(p, pa)
+		s := newSourceRtmp(p, pa, func(s *sourceRtmp) { s.p.sourceRtmpReady <- s },
+			func(s *sourceRtmp) { s.p.sourceRtmpReady <- s })
 		pa.source = s
 	}
 
@@ -58,7 +63,7 @@ func (pa *path) log(format string, args ...interface{}) {
 	pa.p.log("[path "+pa.name+"] "+format, args...)
 }
 
-func (pa *path) onInit() {
+func (pa *path) start() {
 	if source, ok := pa.source.(*sourceRtsp); ok {
 		go source.run(source.state)
 
@@ -77,7 +82,9 @@ func (pa *path) onInit() {
 	}
 }
 
-func (pa *path) onClose() {
+func (pa *path) close() {
+	delete(pa.p.paths, pa.name)
+
 	if source, ok := pa.source.(*sourceRtsp); ok {
 		close(source.terminate)
 		<-source.done
@@ -159,8 +166,7 @@ func (pa *path) onCheck() {
 			time.Since(pa.lastDescribeReq) >= sourceStopAfterDescribePeriod {
 			pa.log("stopping on demand rtsp source (not requested anymore)")
 			atomic.AddInt64(pa.p.stats.CountSourcesRtspRunning, -1)
-			source.state = sourceRtspStateStopped
-			source.setState <- source.state
+			source.setState(sourceRtspStateStopped)
 		}
 
 		// stop on demand rtmp source if needed
@@ -171,8 +177,7 @@ func (pa *path) onCheck() {
 			time.Since(pa.lastDescribeReq) >= sourceStopAfterDescribePeriod {
 			pa.log("stopping on demand rtmp source (not requested anymore)")
 			atomic.AddInt64(pa.p.stats.CountSourcesRtmpRunning, -1)
-			source.state = sourceRtmpStateStopped
-			source.setState <- source.state
+			source.setState(sourceRtmpStateStopped)
 		}
 	}
 
@@ -189,8 +194,7 @@ func (pa *path) onCheck() {
 	if pa.conf.Regexp != nil &&
 		pa.source == nil &&
 		!pa.hasClients() {
-		pa.onClose()
-		delete(pa.p.paths, pa.name)
+		pa.close()
 	}
 }
 
@@ -268,8 +272,7 @@ func (pa *path) onDescribe(client *client) {
 				pa.log("starting on demand rtsp source")
 				pa.lastDescribeActivation = time.Now()
 				atomic.AddInt64(pa.p.stats.CountSourcesRtspRunning, +1)
-				source.state = sourceRtspStateRunning
-				source.setState <- source.state
+				source.setState(sourceRtspStateRunning)
 			}
 
 			// start rtmp source if needed
@@ -278,8 +281,7 @@ func (pa *path) onDescribe(client *client) {
 				pa.log("starting on demand rtmp source")
 				pa.lastDescribeActivation = time.Now()
 				atomic.AddInt64(pa.p.stats.CountSourcesRtmpRunning, +1)
-				source.state = sourceRtmpStateRunning
-				source.setState <- source.state
+				source.setState(sourceRtmpStateRunning)
 			}
 		}
 

@@ -150,7 +150,7 @@ func (c *client) close() {
 	switch c.state {
 	case clientStatePlay:
 		atomic.AddInt64(c.p.stats.CountReaders, -1)
-		c.p.readersMap.remove(c)
+		c.path.readers.Remove(c)
 
 	case clientStateRecord:
 		atomic.AddInt64(c.p.stats.CountPublishers, -1)
@@ -1172,7 +1172,7 @@ func (c *client) runRecordTCP() {
 
 				c.rtcpReceivers[recvt.TrackId].OnFrame(recvt.StreamType, recvt.Content)
 
-				c.p.readersMap.forwardFrame(c.path, recvt.TrackId, recvt.StreamType, recvt.Content)
+				c.path.readers.ForwardFrame(recvt.TrackId, recvt.StreamType, recvt.Content)
 
 			case *base.Request:
 				err := c.handleRequest(recvt)
@@ -1226,8 +1226,39 @@ func (c *client) OnUdpFramePublished(trackId int, streamType base.StreamType, bu
 
 	c.rtcpReceivers[trackId].OnFrame(streamType, buf)
 
-	c.p.readersMap.forwardFrame(c.path,
+	c.path.readers.ForwardFrame(
 		trackId,
 		streamType,
 		buf)
+}
+
+func (c *client) OnFrameRead(trackId int, streamType base.StreamType, buf []byte) {
+	track, ok := c.streamTracks[trackId]
+	if !ok {
+		return
+	}
+
+	if c.streamProtocol == gortsplib.StreamProtocolUDP {
+		if streamType == gortsplib.StreamTypeRtp {
+			c.p.serverUdpRtp.Write(buf, &net.UDPAddr{
+				IP:   c.ip(),
+				Zone: c.zone(),
+				Port: track.rtpPort,
+			})
+
+		} else {
+			c.p.serverUdpRtcp.Write(buf, &net.UDPAddr{
+				IP:   c.ip(),
+				Zone: c.zone(),
+				Port: track.rtcpPort,
+			})
+		}
+
+	} else {
+		c.tcpFrame <- &base.InterleavedFrame{
+			TrackId:    trackId,
+			StreamType: streamType,
+			Content:    buf,
+		}
+	}
 }

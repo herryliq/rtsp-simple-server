@@ -18,6 +18,10 @@ const (
 	sourceRtmpRetryInterval = 5 * time.Second
 )
 
+type OnRtmpReadyFunc func(*sourceRtmp)
+
+type OnRtmpNotReadyFunc func(*sourceRtmp)
+
 type sourceRtmpState int
 
 const (
@@ -30,22 +34,26 @@ type sourceRtmp struct {
 	path         *path
 	state        sourceRtmpState
 	innerRunning bool
+	onReady      OnRtmpReadyFunc
+	onNotReady   OnRtmpNotReadyFunc
 
 	innerTerminate chan struct{}
 	innerDone      chan struct{}
-	setState       chan sourceRtmpState
+	stateChange    chan sourceRtmpState
 	terminate      chan struct{}
 	done           chan struct{}
 }
 
-func newSourceRtmp(p *program, path *path) *sourceRtmp {
+func newSourceRtmp(p *program, path *path, onReady OnRtmpReadyFunc, onNotReady OnRtmpNotReadyFunc) *sourceRtmp {
 	s := &sourceRtmp{
-		p:         p,
-		path:      path,
-		state:     sourceRtmpStateStopped,
-		setState:  make(chan sourceRtmpState),
-		terminate: make(chan struct{}),
-		done:      make(chan struct{}),
+		p:           p,
+		path:        path,
+		state:       sourceRtmpStateStopped,
+		onReady:     onReady,
+		onNotReady:  onNotReady,
+		stateChange: make(chan sourceRtmpState),
+		terminate:   make(chan struct{}),
+		done:        make(chan struct{}),
 	}
 
 	atomic.AddInt64(p.stats.CountSourcesRtmp, +1)
@@ -60,6 +68,11 @@ func newSourceRtmp(p *program, path *path) *sourceRtmp {
 
 func (s *sourceRtmp) isSource() {}
 
+func (s *sourceRtmp) setState(state sourceRtmpState) {
+	s.state = state
+	s.stateChange <- s.state
+}
+
 func (s *sourceRtmp) run(initialState sourceRtmpState) {
 	defer close(s.done)
 
@@ -68,7 +81,7 @@ func (s *sourceRtmp) run(initialState sourceRtmpState) {
 outer:
 	for {
 		select {
-		case state := <-s.setState:
+		case state := <-s.stateChange:
 			s.applyState(state)
 
 		case <-s.terminate:
@@ -81,7 +94,7 @@ outer:
 		<-s.innerDone
 	}
 
-	close(s.setState)
+	close(s.stateChange)
 }
 
 func (s *sourceRtmp) applyState(state sourceRtmpState) {
@@ -285,7 +298,7 @@ func (s *sourceRtmp) runInnerInner() bool {
 				}
 
 				for _, f := range frames {
-					s.p.readersMap.forwardFrame(s.path, videoTrack.Id, gortsplib.StreamTypeRtp, f)
+					s.path.readers.ForwardFrame(videoTrack.Id, gortsplib.StreamTypeRtp, f)
 				}
 
 			case av.AAC:
@@ -301,7 +314,7 @@ func (s *sourceRtmp) runInnerInner() bool {
 				}
 
 				for _, f := range frames {
-					s.p.readersMap.forwardFrame(s.path, audioTrack.Id, gortsplib.StreamTypeRtp, f)
+					s.path.readers.ForwardFrame(audioTrack.Id, gortsplib.StreamTypeRtp, f)
 				}
 
 			default:

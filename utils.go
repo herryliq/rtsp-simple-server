@@ -4,10 +4,6 @@ import (
 	"fmt"
 	"net"
 	"strings"
-	"sync"
-
-	"github.com/aler9/gortsplib"
-	"github.com/aler9/gortsplib/base"
 )
 
 func ipEqualOrInRange(ip net.IP, ips []interface{}) bool {
@@ -61,76 +57,4 @@ func removeQueryFromPath(path string) string {
 		return path[:i]
 	}
 	return path
-}
-
-type readersMap struct {
-	mutex sync.RWMutex
-	ma    map[*client]struct{}
-}
-
-func newReadersMap() *readersMap {
-	return &readersMap{
-		ma: make(map[*client]struct{}),
-	}
-}
-
-func (m *readersMap) clear() {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-
-	m.ma = make(map[*client]struct{})
-}
-
-func (m *readersMap) add(reader *client) {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-
-	m.ma[reader] = struct{}{}
-}
-
-func (m *readersMap) remove(reader *client) {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-
-	delete(m.ma, reader)
-}
-
-func (m *readersMap) forwardFrame(path *path, trackId int, streamType gortsplib.StreamType, frame []byte) {
-	m.mutex.RLock()
-	defer m.mutex.RUnlock()
-
-	for c := range m.ma {
-		if c.path != path {
-			continue
-		}
-
-		track, ok := c.streamTracks[trackId]
-		if !ok {
-			continue
-		}
-
-		if c.streamProtocol == gortsplib.StreamProtocolUDP {
-			if streamType == gortsplib.StreamTypeRtp {
-				c.p.serverUdpRtp.Write(frame, &net.UDPAddr{
-					IP:   c.ip(),
-					Zone: c.zone(),
-					Port: track.rtpPort,
-				})
-
-			} else {
-				c.p.serverUdpRtcp.Write(frame, &net.UDPAddr{
-					IP:   c.ip(),
-					Zone: c.zone(),
-					Port: track.rtcpPort,
-				})
-			}
-
-		} else {
-			c.tcpFrame <- &base.InterleavedFrame{
-				TrackId:    trackId,
-				StreamType: streamType,
-				Content:    frame,
-			}
-		}
-	}
 }

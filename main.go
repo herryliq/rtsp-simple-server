@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -37,9 +38,9 @@ type program struct {
 	serverTcp     *servertcp.ServerTCP
 	clients       map[*client]struct{}
 	clientsWg     sync.WaitGroup
-	readersMap    *readersMap
 	stats         *stats.Stats
 
+	clientNew          chan net.Conn
 	clientClose        chan *client
 	clientDescribe     chan clientDescribeReq
 	clientAnnounce     chan clientAnnounceReq
@@ -77,8 +78,8 @@ func newProgram(args []string) (*program, error) {
 		conf:               conf,
 		paths:              make(map[string]*path),
 		clients:            make(map[*client]struct{}),
-		readersMap:         newReadersMap(),
 		stats:              stats.New(),
+		clientNew:          make(chan net.Conn),
 		clientClose:        make(chan *client),
 		clientDescribe:     make(chan clientDescribeReq),
 		clientAnnounce:     make(chan clientAnnounceReq),
@@ -141,7 +142,8 @@ func newProgram(args []string) (*program, error) {
 		}
 	}
 
-	p.serverTcp, err = servertcp.New(p.log, conf.RtspPort)
+	p.serverTcp, err = servertcp.New(p.log, conf.RtspPort,
+		func(c net.Conn) { p.clientNew <- c })
 	if err != nil {
 		p.pprof.Close()
 		p.metrics.Close()
@@ -173,7 +175,7 @@ func (p *program) run() {
 	defer close(p.done)
 
 	for _, p := range p.paths {
-		p.onInit()
+		p.start()
 	}
 
 	checkPathsTicker := time.NewTicker(checkPathPeriod)
@@ -187,7 +189,7 @@ outer:
 				path.onCheck()
 			}
 
-		case conn := <-p.serverTcp.NewClient:
+		case conn := <-p.clientNew:
 			newClient(p, conn)
 
 		case client := <-p.clientClose:
@@ -243,7 +245,7 @@ outer:
 		case client := <-p.clientPlay:
 			atomic.AddInt64(p.stats.CountReaders, 1)
 			client.state = clientStatePlay
-			p.readersMap.add(client)
+			client.path.readers.Add(client)
 
 		case client := <-p.clientRecord:
 			atomic.AddInt64(p.stats.CountPublishers, 1)
@@ -281,19 +283,18 @@ outer:
 	go func() {
 		for {
 			select {
-			case _, ok := <-p.clientClose:
+			case co, ok := <-p.clientNew:
 				if !ok {
 					return
 				}
+				co.Close()
 
+			case <-p.clientClose:
 			case <-p.clientDescribe:
-
 			case req := <-p.clientAnnounce:
 				req.res <- fmt.Errorf("terminated")
-
 			case req := <-p.clientSetupPlay:
 				req.res <- fmt.Errorf("terminated")
-
 			case <-p.clientPlay:
 			case <-p.clientRecord:
 			case <-p.sourceRtspReady:
@@ -304,10 +305,8 @@ outer:
 		}
 	}()
 
-	p.readersMap.clear()
-
 	for _, p := range p.paths {
-		p.onClose()
+		p.close()
 	}
 
 	p.serverTcp.Close()
