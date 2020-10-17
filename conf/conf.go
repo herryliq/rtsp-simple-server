@@ -2,7 +2,6 @@ package conf
 
 import (
 	"fmt"
-	"net"
 	"net/url"
 	"os"
 	"regexp"
@@ -16,30 +15,6 @@ import (
 	"github.com/aler9/rtsp-simple-server/confenv"
 	"github.com/aler9/rtsp-simple-server/loghandler"
 )
-
-func parseIpCidrList(in []string) ([]interface{}, error) {
-	if len(in) == 0 {
-		return nil, nil
-	}
-
-	var ret []interface{}
-	for _, t := range in {
-		_, ipnet, err := net.ParseCIDR(t)
-		if err == nil {
-			ret = append(ret, ipnet)
-			continue
-		}
-
-		ip := net.ParseIP(t)
-		if ip != nil {
-			ret = append(ret, ip)
-			continue
-		}
-
-		return nil, fmt.Errorf("unable to parse ip/network '%s'", t)
-	}
-	return ret, nil
-}
 
 var rePathName = regexp.MustCompile("^[0-9a-zA-Z_\\-/]+$")
 
@@ -132,7 +107,7 @@ func Load(fpath string) (*Conf, error) {
 	}
 
 	// read from environment
-	err = confenv.Process("RTSP", conf)
+	err = confenv.Load("RTSP", conf)
 	if err != nil {
 		return nil, err
 	}
