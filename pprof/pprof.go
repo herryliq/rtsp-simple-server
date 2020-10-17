@@ -18,7 +18,7 @@ type Pprof struct {
 	server   *http.Server
 }
 
-func New(logFunc LogFunc) (*Pprof, error) {
+func New(log LogFunc) (*Pprof, error) {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return nil, err
@@ -32,7 +32,7 @@ func New(logFunc LogFunc) (*Pprof, error) {
 		Handler: http.DefaultServeMux,
 	}
 
-	logFunc("[pprof] opened on " + address)
+	log("[pprof] opened on " + address)
 
 	go pp.run()
 	return pp, nil

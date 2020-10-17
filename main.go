@@ -7,7 +7,6 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/aler9/gortsplib"
 	"gopkg.in/alecthomas/kingpin.v2"
@@ -23,34 +22,29 @@ import (
 
 var Version = "v0.0.0"
 
-const (
-	checkPathPeriod = 5 * time.Second
-)
-
 type program struct {
 	conf          *conf.Conf
 	logHandler    *loghandler.LogHandler
 	metrics       *metrics.Metrics
 	pprof         *pprof.Pprof
+	serverUdpRtp  *serverudp.Server
+	serverUdpRtcp *serverudp.Server
+	serverTcp     *servertcp.Server
 	paths         map[string]*path
-	serverUdpRtp  *serverudp.ServerUDP
-	serverUdpRtcp *serverudp.ServerUDP
-	serverTcp     *servertcp.ServerTCP
+	pathsWg       sync.WaitGroup
 	clients       map[*client]struct{}
 	clientsWg     sync.WaitGroup
 	stats         *stats.Stats
 
+	pathClose       chan *path
 	clientNew       chan net.Conn
 	clientClose     chan *client
 	clientDescribe  chan clientDescribeReq
 	clientAnnounce  chan clientAnnounceReq
 	clientSetupPlay chan clientSetupPlayReq
-	clientPlay      chan *client
-	clientRecord    chan *client
-	sourceReady     chan *path
-	sourceNotReady  chan *path
-	terminate       chan struct{}
-	done            chan struct{}
+
+	terminate chan struct{}
+	done      chan struct{}
 }
 
 func newProgram(args []string) (*program, error) {
@@ -77,21 +71,19 @@ func newProgram(args []string) (*program, error) {
 		paths:           make(map[string]*path),
 		clients:         make(map[*client]struct{}),
 		stats:           stats.New(),
+		pathClose:       make(chan *path),
 		clientNew:       make(chan net.Conn),
 		clientClose:     make(chan *client),
 		clientDescribe:  make(chan clientDescribeReq),
 		clientAnnounce:  make(chan clientAnnounceReq),
 		clientSetupPlay: make(chan clientSetupPlayReq),
-		clientPlay:      make(chan *client),
-		clientRecord:    make(chan *client),
-		sourceReady:     make(chan *path),
-		sourceNotReady:  make(chan *path),
 		terminate:       make(chan struct{}),
 		done:            make(chan struct{}),
 	}
 
 	p.logHandler, err = loghandler.New(conf.LogDestinationsParsed, conf.LogFile)
 	if err != nil {
+		p.closeResources()
 		return nil, err
 	}
 
@@ -100,7 +92,7 @@ func newProgram(args []string) (*program, error) {
 	if conf.Metrics {
 		p.metrics, err = metrics.New(p.log, p.stats)
 		if err != nil {
-			p.logHandler.Close()
+			p.closeResources()
 			return nil, err
 		}
 	}
@@ -108,32 +100,21 @@ func newProgram(args []string) (*program, error) {
 	if conf.Pprof {
 		p.pprof, err = pprof.New(p.log)
 		if err != nil {
-			p.logHandler.Close()
-			p.metrics.Close()
+			p.closeResources()
 			return nil, err
-		}
-	}
-
-	for name, pathConf := range conf.Paths {
-		if pathConf.Regexp == nil {
-			p.paths[name] = newPath(p, name, pathConf)
 		}
 	}
 
 	if _, ok := conf.ProtocolsParsed[gortsplib.StreamProtocolUDP]; ok {
 		p.serverUdpRtp, err = serverudp.New(p.log, p.conf.WriteTimeout, conf.RtpPort, gortsplib.StreamTypeRtp)
 		if err != nil {
-			p.pprof.Close()
-			p.metrics.Close()
-			p.logHandler.Close()
+			p.closeResources()
 			return nil, err
 		}
 
 		p.serverUdpRtcp, err = serverudp.New(p.log, p.conf.WriteTimeout, conf.RtcpPort, gortsplib.StreamTypeRtcp)
 		if err != nil {
-			p.pprof.Close()
-			p.metrics.Close()
-			p.logHandler.Close()
+			p.closeResources()
 			return nil, err
 		}
 	}
@@ -141,16 +122,17 @@ func newProgram(args []string) (*program, error) {
 	p.serverTcp, err = servertcp.New(p.log, conf.RtspPort,
 		func(c net.Conn) { p.clientNew <- c })
 	if err != nil {
-		p.pprof.Close()
-		p.metrics.Close()
-		p.logHandler.Close()
-		if p.serverUdpRtp != nil {
-			p.serverUdpRtp.Close()
-		}
-		if p.serverUdpRtcp != nil {
-			p.serverUdpRtcp.Close()
-		}
+		p.closeResources()
 		return nil, err
+	}
+
+	for name, pathConf := range conf.Paths {
+		if pathConf.Regexp == nil {
+			pa := newPath(p.pathsWg, p.log, p.stats, p.serverUdpRtp, p.serverUdpRtcp,
+				p.conf.ReadTimeout, p.conf.WriteTimeout, name, pathConf,
+				func(pa *path) { p.pathClose <- pa })
+			p.paths[name] = pa
+		}
 	}
 
 	go p.run()
@@ -170,20 +152,12 @@ func (p *program) log(format string, args ...interface{}) {
 func (p *program) run() {
 	defer close(p.done)
 
-	for _, p := range p.paths {
-		p.start()
-	}
-
-	checkPathsTicker := time.NewTicker(checkPathPeriod)
-	defer checkPathsTicker.Stop()
-
 outer:
 	for {
 		select {
-		case <-checkPathsTicker.C:
-			for _, path := range p.paths {
-				path.onCheck()
-			}
+		case pa := <-p.pathClose:
+			delete(p.paths, pa.name)
+			pa.close()
 
 		case conn := <-p.clientNew:
 			newClient(p, conn)
@@ -197,82 +171,50 @@ outer:
 		case req := <-p.clientDescribe:
 			// create path if it doesn't exist
 			if _, ok := p.paths[req.pathName]; !ok {
-				p.paths[req.pathName] = newPath(p, req.pathName, req.pathConf)
+				pa := newPath(p.pathsWg, p.log, p.stats, p.serverUdpRtp, p.serverUdpRtcp,
+					p.conf.ReadTimeout, p.conf.WriteTimeout, req.pathName, req.pathConf,
+					func(pa *path) { p.pathClose <- pa })
+				p.paths[req.pathName] = pa
 			}
 
-			p.paths[req.pathName].onDescribe(req.client)
-
-		case req := <-p.clientAnnounce:
-			// create path if it doesn't exist
-			if path, ok := p.paths[req.pathName]; !ok {
-				p.paths[req.pathName] = newPath(p, req.pathName, req.pathConf)
-
-			} else {
-				if path.source != nil {
-					req.res <- fmt.Errorf("someone is already publishing on path '%s'", req.pathName)
-					continue
-				}
-			}
-
-			p.paths[req.pathName].source = req.client
-			p.paths[req.pathName].sourceTrackCount = req.trackCount
-			p.paths[req.pathName].sourceSdp = req.sdp
-
-			req.client.path = p.paths[req.pathName]
-			req.client.state = clientStatePreRecord
-			req.res <- nil
+			p.paths[req.pathName].clientDescribe <- req
 
 		case req := <-p.clientSetupPlay:
-			path, ok := p.paths[req.pathName]
-			if !ok || !path.sourceReady {
+			if _, ok := p.paths[req.pathName]; !ok {
 				req.res <- fmt.Errorf("no one is publishing on path '%s'", req.pathName)
 				continue
 			}
 
-			if req.trackId >= path.sourceTrackCount {
-				req.res <- fmt.Errorf("track %d does not exist", req.trackId)
-				continue
+			p.paths[req.pathName].clientSetupPlay <- req
+
+		case req := <-p.clientAnnounce:
+			// create path if it doesn't exist
+			if _, ok := p.paths[req.pathName]; !ok {
+				pa := newPath(p.pathsWg, p.log, p.stats, p.serverUdpRtp, p.serverUdpRtcp,
+					p.conf.ReadTimeout, p.conf.WriteTimeout, req.pathName, req.pathConf,
+					func(pa *path) { p.pathClose <- pa })
+				p.paths[req.pathName] = pa
 			}
 
-			req.client.path = path
-			req.client.state = clientStatePrePlay
-			req.res <- nil
-
-		case client := <-p.clientPlay:
-			atomic.AddInt64(p.stats.CountReaders, 1)
-			client.state = clientStatePlay
-			client.path.readers.Add(client)
-
-		case client := <-p.clientRecord:
-			atomic.AddInt64(p.stats.CountPublishers, 1)
-			client.state = clientStateRecord
-
-			if client.streamProtocol == gortsplib.StreamProtocolUDP {
-				for trackId, track := range client.streamTracks {
-					addr := serverudp.MakePublisherAddr(client.ip(), track.rtpPort)
-					p.serverUdpRtp.AddPublisher(addr, client, trackId)
-
-					addr = serverudp.MakePublisherAddr(client.ip(), track.rtcpPort)
-					p.serverUdpRtcp.AddPublisher(addr, client, trackId)
-				}
-			}
-
-			client.path.onSourceSetReady()
-
-		case pa := <-p.sourceReady:
-			pa.onSourceSetReady()
-
-		case pa := <-p.sourceNotReady:
-			pa.onSourceSetNotReady()
+			p.paths[req.pathName].clientAnnounce <- req
 
 		case <-p.terminate:
 			break outer
 		}
 	}
 
+	p.closeResources()
+}
+
+func (p *program) closeResources() {
 	go func() {
 		for {
 			select {
+			case _, ok := <-p.pathClose:
+				if !ok {
+					return
+				}
+
 			case co, ok := <-p.clientNew:
 				if !ok {
 					return
@@ -281,14 +223,12 @@ outer:
 
 			case <-p.clientClose:
 			case <-p.clientDescribe:
+
 			case req := <-p.clientAnnounce:
 				req.res <- fmt.Errorf("terminated")
+
 			case req := <-p.clientSetupPlay:
 				req.res <- fmt.Errorf("terminated")
-			case <-p.clientPlay:
-			case <-p.clientRecord:
-			case <-p.sourceReady:
-			case <-p.sourceNotReady:
 			}
 		}
 	}()
@@ -296,8 +236,11 @@ outer:
 	for _, p := range p.paths {
 		p.close()
 	}
+	p.pathsWg.Wait()
 
-	p.serverTcp.Close()
+	if p.serverTcp != nil {
+		p.serverTcp.Close()
+	}
 
 	if p.serverUdpRtcp != nil {
 		p.serverUdpRtcp.Close()
@@ -310,7 +253,6 @@ outer:
 	for c := range p.clients {
 		c.close()
 	}
-
 	p.clientsWg.Wait()
 
 	if p.metrics != nil {
@@ -321,17 +263,16 @@ outer:
 		p.pprof.Close()
 	}
 
-	p.logHandler.Close()
+	if p.logHandler != nil {
+		p.logHandler.Close()
+	}
 
+	close(p.pathClose)
 	close(p.clientNew)
 	close(p.clientClose)
 	close(p.clientDescribe)
 	close(p.clientAnnounce)
 	close(p.clientSetupPlay)
-	close(p.clientPlay)
-	close(p.clientRecord)
-	close(p.sourceReady)
-	close(p.sourceNotReady)
 }
 
 func (p *program) close() {

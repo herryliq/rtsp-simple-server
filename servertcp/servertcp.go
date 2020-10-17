@@ -8,14 +8,14 @@ type LogFunc func(string, ...interface{})
 
 type OnNewConnFunc func(net.Conn)
 
-type ServerTCP struct {
+type Server struct {
 	onNewConn OnNewConnFunc
 	listener  *net.TCPListener
 
 	done chan struct{}
 }
 
-func New(logFunc LogFunc, port int, onNewConn OnNewConnFunc) (*ServerTCP, error) {
+func New(log LogFunc, port int, onNewConn OnNewConnFunc) (*Server, error) {
 	listener, err := net.ListenTCP("tcp", &net.TCPAddr{
 		Port: port,
 	})
@@ -23,19 +23,19 @@ func New(logFunc LogFunc, port int, onNewConn OnNewConnFunc) (*ServerTCP, error)
 		return nil, err
 	}
 
-	s := &ServerTCP{
+	s := &Server{
 		onNewConn: onNewConn,
 		listener:  listener,
 		done:      make(chan struct{}),
 	}
 
-	logFunc("[TCP server] opened on :%d", port)
+	log("[TCP server] opened on :%d", port)
 
 	go s.run()
 	return s, nil
 }
 
-func (s *ServerTCP) run() {
+func (s *Server) run() {
 	defer close(s.done)
 
 	for {
@@ -48,7 +48,7 @@ func (s *ServerTCP) run() {
 	}
 }
 
-func (s *ServerTCP) Close() {
+func (s *Server) Close() {
 	s.listener.Close()
 	<-s.done
 }

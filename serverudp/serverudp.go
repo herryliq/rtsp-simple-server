@@ -50,7 +50,7 @@ type bufAddrPair struct {
 
 type LogFunc func(string, ...interface{})
 
-type ServerUDP struct {
+type Server struct {
 	writeTimeout    time.Duration
 	pc              *net.UDPConn
 	streamType      gortsplib.StreamType
@@ -62,7 +62,7 @@ type ServerUDP struct {
 	done   chan struct{}
 }
 
-func New(logFunc LogFunc, writeTimeout time.Duration, port int, streamType gortsplib.StreamType) (*ServerUDP, error) {
+func New(log LogFunc, writeTimeout time.Duration, port int, streamType gortsplib.StreamType) (*Server, error) {
 	pc, err := net.ListenUDP("udp", &net.UDPAddr{
 		Port: port,
 	})
@@ -70,7 +70,7 @@ func New(logFunc LogFunc, writeTimeout time.Duration, port int, streamType gorts
 		return nil, err
 	}
 
-	l := &ServerUDP{
+	l := &Server{
 		writeTimeout: writeTimeout,
 		pc:           pc,
 		streamType:   streamType,
@@ -86,13 +86,13 @@ func New(logFunc LogFunc, writeTimeout time.Duration, port int, streamType gorts
 	} else {
 		label = "RTCP"
 	}
-	logFunc("[UDP/"+label+" server] opened on :%d", port)
+	log("[UDP/"+label+" server] opened on :%d", port)
 
 	go l.run()
 	return l, nil
 }
 
-func (l *ServerUDP) run() {
+func (l *Server) run() {
 	defer close(l.done)
 
 	writeDone := make(chan struct{})
@@ -123,16 +123,16 @@ func (l *ServerUDP) run() {
 	<-writeDone
 }
 
-func (l *ServerUDP) Close() {
+func (l *Server) Close() {
 	l.pc.Close()
 	<-l.done
 }
 
-func (l *ServerUDP) Write(data []byte, addr *net.UDPAddr) {
+func (l *Server) Write(data []byte, addr *net.UDPAddr) {
 	l.writec <- bufAddrPair{data, addr}
 }
 
-func (l *ServerUDP) AddPublisher(addr PublisherAddr, publisher Publisher, trackId int) {
+func (l *Server) AddPublisher(addr PublisherAddr, publisher Publisher, trackId int) {
 	l.publishersMutex.Lock()
 	defer l.publishersMutex.Unlock()
 
@@ -142,14 +142,14 @@ func (l *ServerUDP) AddPublisher(addr PublisherAddr, publisher Publisher, trackI
 	}
 }
 
-func (l *ServerUDP) RemovePublisher(addr PublisherAddr) {
+func (l *Server) RemovePublisher(addr PublisherAddr) {
 	l.publishersMutex.Lock()
 	defer l.publishersMutex.Unlock()
 
 	delete(l.publishers, addr)
 }
 
-func (l *ServerUDP) getPublisher(addr PublisherAddr) *publisherData {
+func (l *Server) getPublisher(addr PublisherAddr) *publisherData {
 	l.publishersMutex.RLock()
 	defer l.publishersMutex.RUnlock()
 

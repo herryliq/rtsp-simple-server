@@ -1,4 +1,4 @@
-package readersmap
+package main
 
 import (
 	"sync"
@@ -16,7 +16,7 @@ type ReadersMap struct {
 	ma    map[Reader]struct{}
 }
 
-func New() *ReadersMap {
+func NewReadersMap() *ReadersMap {
 	return &ReadersMap{
 		ma: make(map[Reader]struct{}),
 	}

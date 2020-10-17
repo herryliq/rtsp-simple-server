@@ -25,7 +25,7 @@ type Metrics struct {
 	server   *http.Server
 }
 
-func New(logFunc LogFunc, stats *stats.Stats) (*Metrics, error) {
+func New(log LogFunc, stats *stats.Stats) (*Metrics, error) {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return nil, err
@@ -43,7 +43,7 @@ func New(logFunc LogFunc, stats *stats.Stats) (*Metrics, error) {
 		Handler: m.mux,
 	}
 
-	logFunc("[metrics] opened on " + address)
+	log("[metrics] opened on " + address)
 
 	go m.run()
 	return m, nil

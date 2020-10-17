@@ -18,7 +18,6 @@ import (
 
 	"github.com/aler9/rtsp-simple-server/conf"
 	"github.com/aler9/rtsp-simple-server/externalcmd"
-	"github.com/aler9/rtsp-simple-server/serverudp"
 )
 
 const (
@@ -33,12 +32,11 @@ type clientDescribeReq struct {
 }
 
 type clientAnnounceReq struct {
-	res        chan error
-	client     *client
-	pathName   string
-	pathConf   *conf.PathConf
-	trackCount int
-	sdp        []byte
+	res      chan error
+	client   *client
+	pathName string
+	pathConf *conf.PathConf
+	tracks   gortsplib.Tracks
 }
 
 type clientSetupPlayReq struct {
@@ -113,8 +111,8 @@ type client struct {
 	describeCSeq      base.HeaderValue
 	describeUrl       string
 
-	describe  chan describeRes
-	tcpFrame  chan *base.InterleavedFrame
+	describe  chan describeRes            // from path
+	tcpFrame  chan *base.InterleavedFrame // from source
 	terminate chan struct{}
 }
 
@@ -146,31 +144,6 @@ func (c *client) close() {
 	delete(c.p.clients, c)
 
 	atomic.AddInt64(c.p.stats.CountClients, -1)
-
-	switch c.state {
-	case clientStatePlay:
-		atomic.AddInt64(c.p.stats.CountReaders, -1)
-		c.path.readers.Remove(c)
-
-	case clientStateRecord:
-		atomic.AddInt64(c.p.stats.CountPublishers, -1)
-
-		if c.streamProtocol == gortsplib.StreamProtocolUDP {
-			for _, track := range c.streamTracks {
-				addr := serverudp.MakePublisherAddr(c.ip(), track.rtpPort)
-				c.p.serverUdpRtp.RemovePublisher(addr)
-
-				addr = serverudp.MakePublisherAddr(c.ip(), track.rtcpPort)
-				c.p.serverUdpRtcp.RemovePublisher(addr)
-			}
-		}
-
-		c.path.onSourceSetNotReady()
-	}
-
-	if c.path != nil && c.path.source == c {
-		c.path.onSourceRemove()
-	}
 
 	close(c.terminate)
 
@@ -442,10 +415,8 @@ func (c *client) handleRequest(req *base.Request) error {
 			return errRunTerminate
 		}
 
-		sdp := tracks.Write()
-
 		res := make(chan error)
-		c.p.clientAnnounce <- clientAnnounceReq{res, c, pathName, pathConf, len(tracks), sdp}
+		c.p.clientAnnounce <- clientAnnounceReq{res, c, pathName, pathConf, tracks}
 		err = <-res
 		if err != nil {
 			c.writeResError(cseq, base.StatusBadRequest, err)
@@ -848,6 +819,9 @@ func (c *client) runInitial() bool {
 			if err != io.EOF && err != errRunTerminate {
 				c.log("ERR: %s", err)
 			}
+			if c.path != nil {
+				c.path.clientClose <- c
+			}
 			c.p.clientClose <- c
 			<-c.terminate
 			return false
@@ -886,8 +860,8 @@ func (c *client) runWaitDescription() bool {
 }
 
 func (c *client) runPlay() bool {
-	// start sending frames only after sending the response to the PLAY request
-	c.p.clientPlay <- c
+	// start sending frames only after replying to the PLAY request
+	c.path.clientPlay <- c
 
 	c.log("is reading from path '%s', %d %s with %s", c.path.name, len(c.streamTracks), func() string {
 		if len(c.streamTracks) == 1 {
@@ -941,6 +915,9 @@ func (c *client) runPlayUDP() {
 		c.conn.Close()
 		if err != io.EOF && err != errRunTerminate {
 			c.log("ERR: %s", err)
+		}
+		if c.path != nil {
+			c.path.clientClose <- c
 		}
 		c.p.clientClose <- c
 		<-c.terminate
@@ -997,6 +974,9 @@ func (c *client) runPlayTCP() {
 				for range c.tcpFrame {
 				}
 			}()
+			if c.path != nil {
+				c.path.clientClose <- c
+			}
 			c.p.clientClose <- c
 			<-c.terminate
 			return
@@ -1031,7 +1011,7 @@ func (c *client) runRecord() bool {
 		}
 	}
 
-	c.p.clientRecord <- c
+	c.path.clientRecord <- c
 
 	c.log("is publishing to path '%s', %d %s with %s", c.path.name, len(c.streamTracks), func() string {
 		if len(c.streamTracks) == 1 {
@@ -1112,6 +1092,9 @@ func (c *client) runRecordUDP() {
 			if err != io.EOF && err != errRunTerminate {
 				c.log("ERR: %s", err)
 			}
+			if c.path != nil {
+				c.path.clientClose <- c
+			}
 			c.p.clientClose <- c
 			<-c.terminate
 			return
@@ -1126,6 +1109,9 @@ func (c *client) runRecordUDP() {
 					c.log("ERR: no packets received recently (maybe there's a firewall/NAT in between)")
 					c.conn.Close()
 					<-readDone
+					if c.path != nil {
+						c.path.clientClose <- c
+					}
 					c.p.clientClose <- c
 					<-c.terminate
 					return
@@ -1197,6 +1183,9 @@ func (c *client) runRecordTCP() {
 			c.conn.Close()
 			if err != io.EOF && err != errRunTerminate {
 				c.log("ERR: %s", err)
+			}
+			if c.path != nil {
+				c.path.clientClose <- c
 			}
 			c.p.clientClose <- c
 			<-c.terminate
