@@ -8,7 +8,7 @@ import (
 )
 
 type Reader interface {
-	OnFrameRead(trackId int, streamType base.StreamType, buf []byte)
+	OnReaderFrame(trackId int, streamType base.StreamType, buf []byte)
 }
 
 type ReadersMap struct {
@@ -41,6 +41,6 @@ func (m *ReadersMap) ForwardFrame(trackId int, streamType gortsplib.StreamType, 
 	defer m.mutex.RUnlock()
 
 	for c := range m.ma {
-		c.OnFrameRead(trackId, streamType, buf)
+		c.OnReaderFrame(trackId, streamType, buf)
 	}
 }

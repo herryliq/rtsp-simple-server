@@ -9,6 +9,7 @@ import (
 
 	"github.com/aler9/gortsplib"
 
+	"github.com/aler9/rtsp-simple-server/client"
 	"github.com/aler9/rtsp-simple-server/conf"
 	"github.com/aler9/rtsp-simple-server/externalcmd"
 	"github.com/aler9/rtsp-simple-server/serverudp"
@@ -24,18 +25,44 @@ const (
 	onDemandCmdStopAfterDescribePeriod = 10 * time.Second
 )
 
-type LogFunc func(string, ...interface{})
-
-type OnCloseFunc func(*path)
+type pathParent interface {
+	Log(string, ...interface{})
+	OnPathClose(*path)
+	OnPathClientClose(*client.Client)
+}
 
 // a source can be a client, a sourcertsp.Source or a sourcertmp.Source
 type source interface {
 	IsSource()
 }
 
+type clientRemoveReq struct {
+	res    chan struct{}
+	client *client.Client
+}
+
+type clientPlayReq struct {
+	res    chan struct{}
+	client *client.Client
+}
+
+type clientRecordReq struct {
+	res    chan struct{}
+	client *client.Client
+}
+
+type pathClientState int
+
+const (
+	pathClientStateWaitingDescribe pathClientState = iota
+	pathClientStatePrePlay
+	pathClientStatePlay
+	pathClientStatePreRecord
+	pathClientStateRecord
+)
+
 type path struct {
-	wg                     sync.WaitGroup
-	log                    LogFunc
+	wg                     *sync.WaitGroup
 	stats                  *stats.Stats
 	serverUdpRtp           *serverudp.Server
 	serverUdpRtcp          *serverudp.Server
@@ -43,7 +70,7 @@ type path struct {
 	writeTimeout           time.Duration
 	name                   string
 	conf                   *conf.PathConf
-	clients                map[*client]struct{}
+	clients                map[*client.Client]pathClientState
 	source                 source
 	sourceReady            bool
 	sourceTrackCount       int
@@ -53,21 +80,21 @@ type path struct {
 	readers                *ReadersMap
 	onInitCmd              *externalcmd.ExternalCmd
 	onDemandCmd            *externalcmd.ExternalCmd
-	onClose                OnCloseFunc
+	parent                 pathParent
 
-	sourceSetReady    chan struct{}
-	sourceSetNotReady chan struct{}
-	clientDescribe    chan clientDescribeReq
-	clientAnnounce    chan clientAnnounceReq
-	clientSetupPlay   chan clientSetupPlayReq
-	clientPlay        chan *client
-	clientRecord      chan *client
-	clientClose       chan *client
+	sourceSetReady    chan struct{}           // from source
+	sourceSetNotReady chan struct{}           // from source
+	clientDescribe    chan clientDescribeReq  // from program
+	clientAnnounce    chan clientAnnounceReq  // from program
+	clientSetupPlay   chan clientSetupPlayReq // from program
+	clientPlay        chan clientPlayReq      // from client
+	clientRecord      chan clientRecordReq    // from client
+	clientRemove      chan clientRemoveReq    // from client
 	terminate         chan struct{}
 }
 
-func newPath(wg sync.WaitGroup,
-	log LogFunc,
+func newPath(
+	wg *sync.WaitGroup,
 	stats *stats.Stats,
 	serverUdpRtp *serverudp.Server,
 	serverUdpRtcp *serverudp.Server,
@@ -75,12 +102,9 @@ func newPath(wg sync.WaitGroup,
 	writeTimeout time.Duration,
 	name string,
 	conf *conf.PathConf,
-	onClose OnCloseFunc) *path {
+	parent pathParent) *path {
 	pa := &path{
-		wg: wg,
-		log: func(format string, args ...interface{}) {
-			log("[path "+name+"] "+format, args...)
-		},
+		wg:                wg,
 		stats:             stats,
 		serverUdpRtp:      serverUdpRtp,
 		serverUdpRtcp:     serverUdpRtcp,
@@ -88,23 +112,27 @@ func newPath(wg sync.WaitGroup,
 		writeTimeout:      writeTimeout,
 		name:              name,
 		conf:              conf,
-		clients:           make(map[*client]struct{}),
+		clients:           make(map[*client.Client]pathClientState),
 		readers:           NewReadersMap(),
-		onClose:           onClose,
+		parent:            parent,
 		sourceSetReady:    make(chan struct{}),
 		sourceSetNotReady: make(chan struct{}),
 		clientDescribe:    make(chan clientDescribeReq),
 		clientAnnounce:    make(chan clientAnnounceReq),
 		clientSetupPlay:   make(chan clientSetupPlayReq),
-		clientPlay:        make(chan *client),
-		clientRecord:      make(chan *client),
-		clientClose:       make(chan *client),
+		clientPlay:        make(chan clientPlayReq),
+		clientRecord:      make(chan clientRecordReq),
+		clientRemove:      make(chan clientRemoveReq),
 		terminate:         make(chan struct{}),
 	}
 
 	pa.wg.Add(1)
 	go pa.run()
 	return pa
+}
+
+func (pa *path) Log(format string, args ...interface{}) {
+	pa.parent.Log("[path "+pa.name+"] "+format, args...)
 }
 
 func (pa *path) run() {
@@ -119,19 +147,10 @@ func (pa *path) run() {
 		s := sourcertsp.New(
 			pa.conf.Source,
 			pa.conf.SourceProtocolParsed,
-			sourcertsp.LogFunc(pa.log),
 			pa.readTimeout,
 			pa.writeTimeout,
 			state,
-			func(s *sourcertsp.Source, tracks gortsplib.Tracks) {
-				pa.sourceSdp = tracks.Write()
-				pa.sourceTrackCount = len(tracks)
-				pa.sourceSetReady <- struct{}{}
-			},
-			func(s *sourcertsp.Source) {
-				pa.sourceSetNotReady <- struct{}{}
-			},
-			pa.readers.ForwardFrame)
+			pa)
 		pa.source = s
 
 		atomic.AddInt64(pa.stats.CountSourcesRtsp, +1)
@@ -147,17 +166,8 @@ func (pa *path) run() {
 
 		s := sourcertmp.New(
 			pa.conf.Source,
-			sourcertmp.LogFunc(pa.log),
 			state,
-			func(s *sourcertmp.Source, tracks gortsplib.Tracks) {
-				pa.sourceSdp = tracks.Write()
-				pa.sourceTrackCount = len(tracks)
-				pa.sourceSetReady <- struct{}{}
-			},
-			func(s *sourcertmp.Source) {
-				pa.sourceSetNotReady <- struct{}{}
-			},
-			pa.readers.ForwardFrame)
+			pa)
 		pa.source = s
 
 		atomic.AddInt64(pa.stats.CountSourcesRtmp, +1)
@@ -167,12 +177,12 @@ func (pa *path) run() {
 	}
 
 	if pa.conf.RunOnInit != "" {
-		pa.log("starting on init command")
+		pa.Log("starting on init command")
 
 		var err error
 		pa.onInitCmd, err = externalcmd.New(pa.conf.RunOnInit, pa.name)
 		if err != nil {
-			pa.log("ERR: %s", err)
+			pa.Log("ERR: %s", err)
 		}
 	}
 
@@ -185,7 +195,7 @@ outer:
 		case <-tickerCheck.C:
 			ok := pa.onCheck()
 			if !ok {
-				pa.onClose(pa)
+				pa.parent.OnPathClose(pa)
 				<-pa.terminate
 				break outer
 			}
@@ -197,33 +207,103 @@ outer:
 			pa.onSourceSetNotReady()
 
 		case req := <-pa.clientDescribe:
+			// reply immediately
+			req.res <- clientDescribeRes{pa, nil}
 			pa.onClientDescribe(req.client)
 
 		case req := <-pa.clientSetupPlay:
 			err := pa.onClientSetupPlay(req.client, req.trackId)
-			req.res <- err
+			if err != nil {
+				req.res <- clientSetupPlayRes{nil, err}
+				continue
+			}
+			req.res <- clientSetupPlayRes{pa, nil}
 
-		case c := <-pa.clientPlay:
-			atomic.AddInt64(pa.stats.CountReaders, 1)
-			pa.onClientPlay(c)
+		case req := <-pa.clientPlay:
+			if _, ok := pa.clients[req.client]; ok {
+				pa.onClientPlay(req.client)
+			}
+			close(req.res)
 
 		case req := <-pa.clientAnnounce:
 			err := pa.onClientAnnounce(req.client, req.tracks)
-			req.res <- err
+			if err != nil {
+				req.res <- clientAnnounceRes{nil, err}
+				continue
+			}
+			req.res <- clientAnnounceRes{pa, nil}
 
-		case c := <-pa.clientRecord:
-			pa.onClientRecord(c)
+		case req := <-pa.clientRecord:
+			if _, ok := pa.clients[req.client]; ok {
+				pa.onClientRecord(req.client)
+			}
+			close(req.res)
 
-		case c := <-pa.clientClose:
-			pa.onClientClose(c)
+		case req := <-pa.clientRemove:
+			if _, ok := pa.clients[req.client]; ok {
+				pa.onClientRemove(req.client)
+			}
+			close(req.res)
 
 		case <-pa.terminate:
 			break outer
 		}
 	}
 
+	go func() {
+		for {
+			select {
+			case _, ok := <-pa.sourceSetReady:
+				if !ok {
+					return
+				}
+
+			case _, ok := <-pa.sourceSetNotReady:
+				if !ok {
+					return
+				}
+
+			case req, ok := <-pa.clientDescribe:
+				if !ok {
+					return
+				}
+				req.res <- clientDescribeRes{nil, fmt.Errorf("terminated")}
+
+			case req, ok := <-pa.clientAnnounce:
+				if !ok {
+					return
+				}
+				req.res <- clientAnnounceRes{nil, fmt.Errorf("terminated")}
+
+			case req, ok := <-pa.clientSetupPlay:
+				if !ok {
+					return
+				}
+				req.res <- clientSetupPlayRes{nil, fmt.Errorf("terminated")}
+
+			case req, ok := <-pa.clientPlay:
+				if !ok {
+					return
+				}
+				close(req.res)
+
+			case req, ok := <-pa.clientRecord:
+				if !ok {
+					return
+				}
+				close(req.res)
+
+			case req, ok := <-pa.clientRemove:
+				if !ok {
+					return
+				}
+				close(req.res)
+			}
+		}
+	}()
+
 	if pa.onInitCmd != nil {
-		pa.log("stopping on init command (closing)")
+		pa.Log("stopping on init command (closing)")
 		pa.onInitCmd.Close()
 	}
 
@@ -235,26 +315,28 @@ outer:
 	}
 
 	if pa.onDemandCmd != nil {
-		pa.log("stopping on demand command (closing)")
+		pa.Log("stopping on demand command (closing)")
 		pa.onDemandCmd.Close()
 	}
 
-	for c := range pa.clients {
-		if c.state == clientStateWaitDescription {
+	for c, state := range pa.clients {
+		if state == pathClientStateWaitingDescribe {
 			delete(pa.clients, c)
-			c.path = nil
-			c.state = clientStateInitial
-			c.describe <- describeRes{nil, fmt.Errorf("publisher of path '%s' has timed out", pa.name)}
+			c.OnPathDescribeData(nil, fmt.Errorf("publisher of path '%s' has timed out", pa.name))
 		} else {
-			c.close()
+			pa.onClientRemove(c)
+			pa.parent.OnPathClientClose(c)
 		}
 	}
 
+	close(pa.sourceSetReady)
+	close(pa.sourceSetNotReady)
 	close(pa.clientDescribe)
-}
-
-func (pa *path) close() {
-	close(pa.terminate)
+	close(pa.clientAnnounce)
+	close(pa.clientSetupPlay)
+	close(pa.clientPlay)
+	close(pa.clientRecord)
+	close(pa.clientRemove)
 }
 
 func (pa *path) hasClients() bool {
@@ -262,8 +344,8 @@ func (pa *path) hasClients() bool {
 }
 
 func (pa *path) hasClientsWaitingDescribe() bool {
-	for c := range pa.clients {
-		if c.state == clientStateWaitDescription {
+	for _, state := range pa.clients {
+		if state == pathClientStateWaitingDescribe {
 			return true
 		}
 	}
@@ -283,12 +365,10 @@ func (pa *path) onCheck() bool {
 	// reply to DESCRIBE requests if they are in timeout
 	if pa.hasClientsWaitingDescribe() &&
 		time.Since(pa.lastDescribeActivation) >= describeTimeout {
-		for c := range pa.clients {
-			if c.state == clientStateWaitDescription {
+		for c, state := range pa.clients {
+			if state == pathClientStateWaitingDescribe {
 				delete(pa.clients, c)
-				c.path = nil
-				c.state = clientStateInitial
-				c.describe <- describeRes{nil, fmt.Errorf("publisher of path '%s' has timed out", pa.name)}
+				c.OnPathDescribeData(nil, fmt.Errorf("publisher of path '%s' has timed out", pa.name))
 			}
 		}
 	}
@@ -299,7 +379,7 @@ func (pa *path) onCheck() bool {
 			source.State() == sourcertsp.StateRunning &&
 			!pa.hasClients() &&
 			time.Since(pa.lastDescribeReq) >= sourceStopAfterDescribePeriod {
-			pa.log("stopping on demand rtsp source (not requested anymore)")
+			pa.Log("stopping on demand rtsp source (not requested anymore)")
 			atomic.AddInt64(pa.stats.CountSourcesRtspRunning, -1)
 			source.SetState(sourcertsp.StateStopped)
 		}
@@ -310,7 +390,7 @@ func (pa *path) onCheck() bool {
 			source.State() == sourcertmp.StateRunning &&
 			!pa.hasClients() &&
 			time.Since(pa.lastDescribeReq) >= sourceStopAfterDescribePeriod {
-			pa.log("stopping on demand rtmp source (not requested anymore)")
+			pa.Log("stopping on demand rtmp source (not requested anymore)")
 			atomic.AddInt64(pa.stats.CountSourcesRtmpRunning, -1)
 			source.SetState(sourcertmp.StateStopped)
 		}
@@ -320,7 +400,7 @@ func (pa *path) onCheck() bool {
 	if pa.onDemandCmd != nil &&
 		!pa.hasClientReadersOrWaitingDescribe() &&
 		time.Since(pa.lastDescribeReq) >= onDemandCmdStopAfterDescribePeriod {
-		pa.log("stopping on demand command (not requested anymore)")
+		pa.Log("stopping on demand command (not requested anymore)")
 		pa.onDemandCmd.Close()
 		pa.onDemandCmd = nil
 	}
@@ -339,12 +419,10 @@ func (pa *path) onSourceSetReady() {
 	pa.sourceReady = true
 
 	// reply to all clients that are waiting for a description
-	for c := range pa.clients {
-		if c.state == clientStateWaitDescription {
+	for c, state := range pa.clients {
+		if state == pathClientStateWaitingDescribe {
 			delete(pa.clients, c)
-			c.path = nil
-			c.state = clientStateInitial
-			c.describe <- describeRes{pa.sourceSdp, nil}
+			c.OnPathDescribeData(pa.sourceSdp, nil)
 		}
 	}
 }
@@ -353,14 +431,15 @@ func (pa *path) onSourceSetNotReady() {
 	pa.sourceReady = false
 
 	// close all clients that are reading or waiting to read
-	for c := range pa.clients {
-		if c.state != clientStateWaitDescription && c != pa.source {
-			c.close()
+	for c, state := range pa.clients {
+		if state != pathClientStateWaitingDescribe && c != pa.source {
+			pa.onClientRemove(c)
+			pa.parent.OnPathClientClose(c)
 		}
 	}
 }
 
-func (pa *path) onClientDescribe(c *client) {
+func (pa *path) onClientDescribe(c *client.Client) {
 	pa.lastDescribeReq = time.Now()
 
 	// publisher not found
@@ -368,23 +447,21 @@ func (pa *path) onClientDescribe(c *client) {
 		// on demand command is available: put the client on hold
 		if pa.conf.RunOnDemand != "" {
 			if pa.onDemandCmd == nil { // start if needed
-				pa.log("starting on demand command")
+				pa.Log("starting on demand command")
 				pa.lastDescribeActivation = time.Now()
 
 				var err error
 				pa.onDemandCmd, err = externalcmd.New(pa.conf.RunOnDemand, pa.name)
 				if err != nil {
-					pa.log("ERR: %s", err)
+					pa.Log("ERR: %s", err)
 				}
 			}
 
-			pa.clients[c] = struct{}{}
-			c.path = pa
-			c.state = clientStateWaitDescription
+			pa.clients[c] = pathClientStateWaitingDescribe
 
 			// no on-demand: reply with 404
 		} else {
-			c.describe <- describeRes{nil, fmt.Errorf("no one is publishing on path '%s'", pa.name)}
+			c.OnPathDescribeData(nil, fmt.Errorf("no one is publishing on path '%s'", pa.name))
 		}
 
 		// publisher was found but is not ready: put the client on hold
@@ -392,7 +469,7 @@ func (pa *path) onClientDescribe(c *client) {
 		// start rtsp source if needed
 		if source, ok := pa.source.(*sourcertsp.Source); ok {
 			if source.State() == sourcertsp.StateStopped {
-				pa.log("starting on demand rtsp source")
+				pa.Log("starting on demand rtsp source")
 				pa.lastDescribeActivation = time.Now()
 				atomic.AddInt64(pa.stats.CountSourcesRtspRunning, +1)
 				source.SetState(sourcertsp.StateRunning)
@@ -401,24 +478,22 @@ func (pa *path) onClientDescribe(c *client) {
 			// start rtmp source if needed
 		} else if source, ok := pa.source.(*sourcertmp.Source); ok {
 			if source.State() == sourcertmp.StateStopped {
-				pa.log("starting on demand rtmp source")
+				pa.Log("starting on demand rtmp source")
 				pa.lastDescribeActivation = time.Now()
 				atomic.AddInt64(pa.stats.CountSourcesRtmpRunning, +1)
 				source.SetState(sourcertmp.StateRunning)
 			}
 		}
 
-		pa.clients[c] = struct{}{}
-		c.path = pa
-		c.state = clientStateWaitDescription
+		pa.clients[c] = pathClientStateWaitingDescribe
 
 		// publisher was found and is ready
 	} else {
-		c.describe <- describeRes{pa.sourceSdp, nil}
+		c.OnPathDescribeData(pa.sourceSdp, nil)
 	}
 }
 
-func (pa *path) onClientSetupPlay(c *client, trackId int) error {
+func (pa *path) onClientSetupPlay(c *client.Client, trackId int) error {
 	if !pa.sourceReady {
 		return fmt.Errorf("no one is publishing on path '%s'", pa.name)
 	}
@@ -427,72 +502,45 @@ func (pa *path) onClientSetupPlay(c *client, trackId int) error {
 		return fmt.Errorf("track %d does not exist", trackId)
 	}
 
-	pa.clients[c] = struct{}{}
-	c.path = pa
-	c.state = clientStatePrePlay
-
+	pa.clients[c] = pathClientStatePrePlay
 	return nil
 }
 
-func (pa *path) onClientPlay(c *client) {
-	c.state = clientStatePlay
+func (pa *path) onClientPlay(c *client.Client) {
+	atomic.AddInt64(pa.stats.CountReaders, 1)
+	pa.clients[c] = pathClientStatePlay
 	pa.readers.Add(c)
 }
 
-func (pa *path) onClientAnnounce(c *client, tracks gortsplib.Tracks) error {
+func (pa *path) onClientAnnounce(c *client.Client, tracks gortsplib.Tracks) error {
 	if pa.source != nil {
 		return fmt.Errorf("someone is already publishing on path '%s'", pa.name)
 	}
 
-	pa.clients[c] = struct{}{}
+	pa.clients[c] = pathClientStatePreRecord
 	pa.source = c
 	pa.sourceTrackCount = len(tracks)
 	pa.sourceSdp = tracks.Write()
-
-	c.path = pa
-	c.state = clientStatePreRecord
-
 	return nil
 }
 
-func (pa *path) onClientRecord(c *client) {
+func (pa *path) onClientRecord(c *client.Client) {
 	atomic.AddInt64(pa.stats.CountPublishers, 1)
-	c.state = clientStateRecord
-
-	if c.streamProtocol == gortsplib.StreamProtocolUDP {
-		for trackId, track := range c.streamTracks {
-			addr := serverudp.MakePublisherAddr(c.ip(), track.rtpPort)
-			pa.serverUdpRtp.AddPublisher(addr, c, trackId)
-
-			addr = serverudp.MakePublisherAddr(c.ip(), track.rtcpPort)
-			pa.serverUdpRtcp.AddPublisher(addr, c, trackId)
-		}
-	}
-
+	pa.clients[c] = pathClientStateRecord
 	pa.onSourceSetReady()
 }
 
-func (pa *path) onClientClose(c *client) {
+func (pa *path) onClientRemove(c *client.Client) {
+	state := pa.clients[c]
 	delete(pa.clients, c)
 
-	switch c.state {
-	case clientStatePlay:
+	switch state {
+	case pathClientStatePlay:
 		atomic.AddInt64(pa.stats.CountReaders, -1)
 		pa.readers.Remove(c)
 
-	case clientStateRecord:
+	case pathClientStateRecord:
 		atomic.AddInt64(pa.stats.CountPublishers, -1)
-
-		if c.streamProtocol == gortsplib.StreamProtocolUDP {
-			for _, track := range c.streamTracks {
-				addr := serverudp.MakePublisherAddr(c.ip(), track.rtpPort)
-				pa.serverUdpRtp.RemovePublisher(addr)
-
-				addr = serverudp.MakePublisherAddr(c.ip(), track.rtcpPort)
-				pa.serverUdpRtcp.RemovePublisher(addr)
-			}
-		}
-
 		pa.onSourceSetNotReady()
 	}
 
@@ -500,10 +548,59 @@ func (pa *path) onClientClose(c *client) {
 		pa.source = nil
 
 		// close all clients that are reading or waiting to read
-		for oc := range pa.clients {
-			if oc.state != clientStateWaitDescription && oc != pa.source {
-				oc.close()
+		for oc, state := range pa.clients {
+			if state != pathClientStateWaitingDescribe && oc != pa.source {
+				pa.onClientRemove(oc)
+				pa.parent.OnPathClientClose(oc)
 			}
 		}
 	}
+}
+
+func (pa *path) OnSourceReady(tracks gortsplib.Tracks) {
+	pa.sourceSdp = tracks.Write()
+	pa.sourceTrackCount = len(tracks)
+	pa.sourceSetReady <- struct{}{}
+}
+
+func (pa *path) OnSourceNotReady() {
+	pa.sourceSetNotReady <- struct{}{}
+}
+
+func (pa *path) OnSourceFrame(trackId int, streamType gortsplib.StreamType, buf []byte) {
+	pa.readers.ForwardFrame(trackId, streamType, buf)
+}
+
+func (pa *path) Name() string {
+	return pa.name
+}
+
+func (pa *path) SourceTrackCount() int {
+	return pa.sourceTrackCount
+}
+
+func (pa *path) Conf() *conf.PathConf {
+	return pa.conf
+}
+
+func (pa *path) OnClientRemove(c *client.Client) {
+	res := make(chan struct{})
+	pa.clientRemove <- clientRemoveReq{res, c}
+	<-res
+}
+
+func (pa *path) OnClientPlay(c *client.Client) {
+	res := make(chan struct{})
+	pa.clientPlay <- clientPlayReq{res, c}
+	<-res
+}
+
+func (pa *path) OnClientRecord(c *client.Client) {
+	res := make(chan struct{})
+	pa.clientRecord <- clientRecordReq{res, c}
+	<-res
+}
+
+func (pa *path) OnClientFrame(trackId int, streamType gortsplib.StreamType, buf []byte) {
+	pa.readers.ForwardFrame(trackId, streamType, buf)
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/aler9/gortsplib"
 	"gopkg.in/alecthomas/kingpin.v2"
 
+	"github.com/aler9/rtsp-simple-server/client"
 	"github.com/aler9/rtsp-simple-server/conf"
 	"github.com/aler9/rtsp-simple-server/loghandler"
 	"github.com/aler9/rtsp-simple-server/metrics"
@@ -22,6 +23,43 @@ import (
 
 var Version = "v0.0.0"
 
+type clientDescribeRes struct {
+	path client.Path
+	err  error
+}
+
+type clientDescribeReq struct {
+	res      chan clientDescribeRes
+	client   *client.Client
+	pathName string
+	pathConf *conf.PathConf
+}
+
+type clientAnnounceRes struct {
+	path client.Path
+	err  error
+}
+
+type clientAnnounceReq struct {
+	res      chan clientAnnounceRes
+	client   *client.Client
+	pathName string
+	pathConf *conf.PathConf
+	tracks   gortsplib.Tracks
+}
+
+type clientSetupPlayRes struct {
+	path client.Path
+	err  error
+}
+
+type clientSetupPlayReq struct {
+	res      chan clientSetupPlayRes
+	client   *client.Client
+	pathName string
+	trackId  int
+}
+
 type program struct {
 	conf          *conf.Conf
 	logHandler    *loghandler.LogHandler
@@ -32,13 +70,13 @@ type program struct {
 	serverTcp     *servertcp.Server
 	paths         map[string]*path
 	pathsWg       sync.WaitGroup
-	clients       map[*client]struct{}
+	clients       map[*client.Client]struct{}
 	clientsWg     sync.WaitGroup
 	stats         *stats.Stats
 
 	pathClose       chan *path
 	clientNew       chan net.Conn
-	clientClose     chan *client
+	clientClose     chan *client.Client
 	clientDescribe  chan clientDescribeReq
 	clientAnnounce  chan clientAnnounceReq
 	clientSetupPlay chan clientSetupPlayReq
@@ -69,11 +107,11 @@ func newProgram(args []string) (*program, error) {
 	p := &program{
 		conf:            conf,
 		paths:           make(map[string]*path),
-		clients:         make(map[*client]struct{}),
+		clients:         make(map[*client.Client]struct{}),
 		stats:           stats.New(),
 		pathClose:       make(chan *path),
 		clientNew:       make(chan net.Conn),
-		clientClose:     make(chan *client),
+		clientClose:     make(chan *client.Client),
 		clientDescribe:  make(chan clientDescribeReq),
 		clientAnnounce:  make(chan clientAnnounceReq),
 		clientSetupPlay: make(chan clientSetupPlayReq),
@@ -87,10 +125,10 @@ func newProgram(args []string) (*program, error) {
 		return nil, err
 	}
 
-	p.log("rtsp-simple-server %s", Version)
+	p.Log("rtsp-simple-server %s", Version)
 
 	if conf.Metrics {
-		p.metrics, err = metrics.New(p.log, p.stats)
+		p.metrics, err = metrics.New(p.stats, p)
 		if err != nil {
 			p.closeResources()
 			return nil, err
@@ -98,7 +136,7 @@ func newProgram(args []string) (*program, error) {
 	}
 
 	if conf.Pprof {
-		p.pprof, err = pprof.New(p.log)
+		p.pprof, err = pprof.New(p)
 		if err != nil {
 			p.closeResources()
 			return nil, err
@@ -106,21 +144,22 @@ func newProgram(args []string) (*program, error) {
 	}
 
 	if _, ok := conf.ProtocolsParsed[gortsplib.StreamProtocolUDP]; ok {
-		p.serverUdpRtp, err = serverudp.New(p.log, p.conf.WriteTimeout, conf.RtpPort, gortsplib.StreamTypeRtp)
+		p.serverUdpRtp, err = serverudp.New(p.conf.WriteTimeout, conf.RtpPort,
+			gortsplib.StreamTypeRtp, p)
 		if err != nil {
 			p.closeResources()
 			return nil, err
 		}
 
-		p.serverUdpRtcp, err = serverudp.New(p.log, p.conf.WriteTimeout, conf.RtcpPort, gortsplib.StreamTypeRtcp)
+		p.serverUdpRtcp, err = serverudp.New(p.conf.WriteTimeout, conf.RtcpPort,
+			gortsplib.StreamTypeRtcp, p)
 		if err != nil {
 			p.closeResources()
 			return nil, err
 		}
 	}
 
-	p.serverTcp, err = servertcp.New(p.log, conf.RtspPort,
-		func(c net.Conn) { p.clientNew <- c })
+	p.serverTcp, err = servertcp.New(conf.RtspPort, p)
 	if err != nil {
 		p.closeResources()
 		return nil, err
@@ -128,9 +167,8 @@ func newProgram(args []string) (*program, error) {
 
 	for name, pathConf := range conf.Paths {
 		if pathConf.Regexp == nil {
-			pa := newPath(p.pathsWg, p.log, p.stats, p.serverUdpRtp, p.serverUdpRtcp,
-				p.conf.ReadTimeout, p.conf.WriteTimeout, name, pathConf,
-				func(pa *path) { p.pathClose <- pa })
+			pa := newPath(&p.pathsWg, p.stats, p.serverUdpRtp, p.serverUdpRtcp,
+				p.conf.ReadTimeout, p.conf.WriteTimeout, name, pathConf, p)
 			p.paths[name] = pa
 		}
 	}
@@ -140,7 +178,7 @@ func newProgram(args []string) (*program, error) {
 	return p, nil
 }
 
-func (p *program) log(format string, args ...interface{}) {
+func (p *program) Log(format string, args ...interface{}) {
 	CountClients := atomic.LoadInt64(p.stats.CountClients)
 	CountPublishers := atomic.LoadInt64(p.stats.CountPublishers)
 	CountReaders := atomic.LoadInt64(p.stats.CountReaders)
@@ -156,24 +194,24 @@ outer:
 	for {
 		select {
 		case pa := <-p.pathClose:
-			delete(p.paths, pa.name)
-			pa.close()
+			p.onPathClose(pa)
 
 		case conn := <-p.clientNew:
-			newClient(p, conn)
+			c := client.New(&p.clientsWg, p.stats, p.conf,
+				p.serverUdpRtp, p.serverUdpRtcp, conn, p)
+			p.clients[c] = struct{}{}
 
-		case client := <-p.clientClose:
-			if _, ok := p.clients[client]; !ok {
+		case c := <-p.clientClose:
+			if _, ok := p.clients[c]; !ok {
 				continue
 			}
-			client.close()
+			p.onClientClose(c)
 
 		case req := <-p.clientDescribe:
 			// create path if it doesn't exist
 			if _, ok := p.paths[req.pathName]; !ok {
-				pa := newPath(p.pathsWg, p.log, p.stats, p.serverUdpRtp, p.serverUdpRtcp,
-					p.conf.ReadTimeout, p.conf.WriteTimeout, req.pathName, req.pathConf,
-					func(pa *path) { p.pathClose <- pa })
+				pa := newPath(&p.pathsWg, p.stats, p.serverUdpRtp, p.serverUdpRtcp,
+					p.conf.ReadTimeout, p.conf.WriteTimeout, req.pathName, req.pathConf, p)
 				p.paths[req.pathName] = pa
 			}
 
@@ -181,7 +219,7 @@ outer:
 
 		case req := <-p.clientSetupPlay:
 			if _, ok := p.paths[req.pathName]; !ok {
-				req.res <- fmt.Errorf("no one is publishing on path '%s'", req.pathName)
+				req.res <- clientSetupPlayRes{nil, fmt.Errorf("no one is publishing on path '%s'", req.pathName)}
 				continue
 			}
 
@@ -190,9 +228,8 @@ outer:
 		case req := <-p.clientAnnounce:
 			// create path if it doesn't exist
 			if _, ok := p.paths[req.pathName]; !ok {
-				pa := newPath(p.pathsWg, p.log, p.stats, p.serverUdpRtp, p.serverUdpRtcp,
-					p.conf.ReadTimeout, p.conf.WriteTimeout, req.pathName, req.pathConf,
-					func(pa *path) { p.pathClose <- pa })
+				pa := newPath(&p.pathsWg, p.stats, p.serverUdpRtp, p.serverUdpRtcp,
+					p.conf.ReadTimeout, p.conf.WriteTimeout, req.pathName, req.pathConf, p)
 				p.paths[req.pathName] = pa
 			}
 
@@ -222,19 +259,26 @@ func (p *program) closeResources() {
 				co.Close()
 
 			case <-p.clientClose:
-			case <-p.clientDescribe:
+
+			case req := <-p.clientDescribe:
+				req.res <- clientDescribeRes{nil, fmt.Errorf("terminated")}
 
 			case req := <-p.clientAnnounce:
-				req.res <- fmt.Errorf("terminated")
+				req.res <- clientAnnounceRes{nil, fmt.Errorf("terminated")}
 
 			case req := <-p.clientSetupPlay:
-				req.res <- fmt.Errorf("terminated")
+				req.res <- clientSetupPlayRes{nil, fmt.Errorf("terminated")}
 			}
 		}
 	}()
 
-	for _, p := range p.paths {
-		p.close()
+	for c := range p.clients {
+		p.onClientClose(c)
+	}
+	p.clientsWg.Wait()
+
+	for _, pa := range p.paths {
+		p.onPathClose(pa)
 	}
 	p.pathsWg.Wait()
 
@@ -249,11 +293,6 @@ func (p *program) closeResources() {
 	if p.serverUdpRtp != nil {
 		p.serverUdpRtp.Close()
 	}
-
-	for c := range p.clients {
-		c.close()
-	}
-	p.clientsWg.Wait()
 
 	if p.metrics != nil {
 		p.metrics.Close()
@@ -278,6 +317,53 @@ func (p *program) closeResources() {
 func (p *program) close() {
 	close(p.terminate)
 	<-p.done
+}
+
+func (p *program) onPathClose(pa *path) {
+	delete(p.paths, pa.name)
+	close(pa.terminate)
+}
+
+func (p *program) onClientClose(c *client.Client) {
+	delete(p.clients, c)
+	c.Close()
+}
+
+func (p *program) OnServerTCPConn(conn net.Conn) {
+	p.clientNew <- conn
+}
+
+func (p *program) OnPathClose(pa *path) {
+	p.pathClose <- pa
+}
+
+func (p *program) OnPathClientClose(c *client.Client) {
+	p.clientClose <- c
+}
+
+func (p *program) OnClientClose(c *client.Client) {
+	p.clientClose <- c
+}
+
+func (p *program) OnClientDescribe(c *client.Client, pathName string, pathConf *conf.PathConf) (client.Path, error) {
+	res := make(chan clientDescribeRes)
+	p.clientDescribe <- clientDescribeReq{res, c, pathName, pathConf}
+	re := <-res
+	return re.path, re.err
+}
+
+func (p *program) OnClientAnnounce(c *client.Client, pathName string, pathConf *conf.PathConf, tracks gortsplib.Tracks) (client.Path, error) {
+	res := make(chan clientAnnounceRes)
+	p.clientAnnounce <- clientAnnounceReq{res, c, pathName, pathConf, tracks}
+	re := <-res
+	return re.path, re.err
+}
+
+func (p *program) OnClientSetupPlay(c *client.Client, basePath string, trackId int) (client.Path, error) {
+	res := make(chan clientSetupPlayRes)
+	p.clientSetupPlay <- clientSetupPlayReq{res, c, basePath, trackId}
+	re := <-res
+	return re.path, re.err
 }
 
 func main() {

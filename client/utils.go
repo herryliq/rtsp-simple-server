@@ -1,4 +1,4 @@
-package main
+package client
 
 import (
 	"fmt"
@@ -23,7 +23,15 @@ func ipEqualOrInRange(ip net.IP, ips []interface{}) bool {
 	return false
 }
 
-func splitPath(path string) (string, string, error) {
+func removeQueryFromPath(path string) string {
+	i := strings.Index(path, "?")
+	if i >= 0 {
+		return path[:i]
+	}
+	return path
+}
+
+func splitPathIntoBaseAndControl(path string) (string, string, error) {
 	pos := func() int {
 		for i := len(path) - 1; i >= 0; i-- {
 			if path[i] == '/' {
@@ -49,12 +57,4 @@ func splitPath(path string) (string, string, error) {
 	}
 
 	return basePath, controlPath, nil
-}
-
-func removeQueryFromPath(path string) string {
-	i := strings.Index(path, "?")
-	if i >= 0 {
-		return path[:i]
-	}
-	return path
 }

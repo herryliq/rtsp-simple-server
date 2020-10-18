@@ -16,6 +16,12 @@ const (
 	DestinationSyslog
 )
 
+type writeFunc func(p []byte) (int, error)
+
+func (f writeFunc) Write(p []byte) (int, error) {
+	return f(p)
+}
+
 type LogHandler struct {
 	destinations map[Destination]struct{}
 	file         *os.File
@@ -45,7 +51,7 @@ func New(destinations map[Destination]struct{}, filePath string) (*LogHandler, e
 		}
 	}
 
-	log.SetOutput(lh)
+	log.SetOutput(writeFunc(lh.write))
 
 	return lh, nil
 }
@@ -60,7 +66,7 @@ func (lh *LogHandler) Close() {
 	}
 }
 
-func (lh *LogHandler) Write(p []byte) (int, error) {
+func (lh *LogHandler) write(p []byte) (int, error) {
 	if _, ok := lh.destinations[DestinationStdout]; ok {
 		print(string(p))
 	}

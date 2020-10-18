@@ -18,13 +18,12 @@ const (
 	retryInterval = 5 * time.Second
 )
 
-type LogFunc func(string, ...interface{})
-
-type OnReadyFunc func(*Source, gortsplib.Tracks)
-
-type OnNotReadyFunc func(*Source)
-
-type OnFrameFunc func(int, gortsplib.StreamType, []byte)
+type Parent interface {
+	Log(string, ...interface{})
+	OnSourceReady(gortsplib.Tracks)
+	OnSourceNotReady()
+	OnSourceFrame(int, gortsplib.StreamType, []byte)
+}
 
 type State int
 
@@ -35,12 +34,9 @@ const (
 
 type Source struct {
 	ur           string
-	log          LogFunc
 	state        State
 	innerRunning bool
-	onReady      OnReadyFunc
-	onNotReady   OnNotReadyFunc
-	onFrame      OnFrameFunc
+	parent       Parent
 
 	innerTerminate chan struct{}
 	innerDone      chan struct{}
@@ -50,18 +46,12 @@ type Source struct {
 }
 
 func New(ur string,
-	log LogFunc,
 	state State,
-	onReady OnReadyFunc,
-	onNotReady OnNotReadyFunc,
-	onFrame OnFrameFunc) *Source {
+	parent Parent) *Source {
 	s := &Source{
 		ur:          ur,
-		log:         log,
 		state:       state,
-		onReady:     onReady,
-		onNotReady:  onNotReady,
-		onFrame:     onFrame,
+		parent:      parent,
 		stateChange: make(chan State),
 		terminate:   make(chan struct{}),
 		done:        make(chan struct{}),
@@ -114,7 +104,7 @@ outer:
 func (s *Source) applyState(state State) {
 	if state == StateRunning {
 		if !s.innerRunning {
-			s.log("rtmp source started")
+			s.parent.Log("rtmp source started")
 			s.innerRunning = true
 			s.innerTerminate = make(chan struct{})
 			s.innerDone = make(chan struct{})
@@ -125,7 +115,7 @@ func (s *Source) applyState(state State) {
 			close(s.innerTerminate)
 			<-s.innerDone
 			s.innerRunning = false
-			s.log("rtmp source stopped")
+			s.parent.Log("rtmp source stopped")
 		}
 	}
 }
@@ -152,7 +142,7 @@ outer:
 }
 
 func (s *Source) runInnerInner() bool {
-	s.log("connecting to rtmp source")
+	s.parent.Log("connecting to rtmp source")
 
 	var conn *rtmp.Conn
 	var nconn net.Conn
@@ -170,7 +160,7 @@ func (s *Source) runInnerInner() bool {
 	}
 
 	if err != nil {
-		s.log("rtmp source ERR: %s", err)
+		s.parent.Log("rtmp source ERR: %s", err)
 		return true
 	}
 
@@ -228,7 +218,7 @@ func (s *Source) runInnerInner() bool {
 	}
 
 	if err != nil {
-		s.log("rtmp source ERR: %s", err)
+		s.parent.Log("rtmp source ERR: %s", err)
 		return true
 	}
 
@@ -241,13 +231,13 @@ func (s *Source) runInnerInner() bool {
 	if h264Sps != nil {
 		videoTrack, err = gortsplib.NewTrackH264(len(tracks), h264Sps, h264Pps)
 		if err != nil {
-			s.log("rtmp source ERR: %s", err)
+			s.parent.Log("rtmp source ERR: %s", err)
 			return true
 		}
 
 		h264Encoder, err = rtph264.NewEncoder(uint8(len(tracks)))
 		if err != nil {
-			s.log("rtmp source ERR: %s", err)
+			s.parent.Log("rtmp source ERR: %s", err)
 			return true
 		}
 
@@ -257,13 +247,13 @@ func (s *Source) runInnerInner() bool {
 	if aacConfig != nil {
 		audioTrack, err = gortsplib.NewTrackAac(len(tracks), aacConfig)
 		if err != nil {
-			s.log("rtmp source ERR: %s", err)
+			s.parent.Log("rtmp source ERR: %s", err)
 			return true
 		}
 
 		aacEncoder, err = rtpaac.NewEncoder(uint8(len(tracks)), aacConfig)
 		if err != nil {
-			s.log("rtmp source ERR: %s", err)
+			s.parent.Log("rtmp source ERR: %s", err)
 			return true
 		}
 
@@ -271,12 +261,12 @@ func (s *Source) runInnerInner() bool {
 	}
 
 	if len(tracks) == 0 {
-		s.log("rtmp source ERR: no tracks found")
+		s.parent.Log("rtmp source ERR: no tracks found")
 		return true
 	}
 
-	s.onReady(s, tracks)
-	s.log("rtmp source ready")
+	s.parent.OnSourceReady(tracks)
+	s.parent.Log("rtmp source ready")
 
 	readDone := make(chan error)
 	go func() {
@@ -309,7 +299,7 @@ func (s *Source) runInnerInner() bool {
 				}
 
 				for _, f := range frames {
-					s.onFrame(videoTrack.Id, gortsplib.StreamTypeRtp, f)
+					s.parent.OnSourceFrame(videoTrack.Id, gortsplib.StreamTypeRtp, f)
 				}
 
 			case av.AAC:
@@ -325,7 +315,7 @@ func (s *Source) runInnerInner() bool {
 				}
 
 				for _, f := range frames {
-					s.onFrame(audioTrack.Id, gortsplib.StreamTypeRtp, f)
+					s.parent.OnSourceFrame(audioTrack.Id, gortsplib.StreamTypeRtp, f)
 				}
 
 			default:
@@ -348,14 +338,14 @@ outer:
 
 		case err := <-readDone:
 			nconn.Close()
-			s.log("rtmp source ERR: %s", err)
+			s.parent.Log("rtmp source ERR: %s", err)
 			ret = true
 			break outer
 		}
 	}
 
-	s.onNotReady(s)
-	s.log("rtmp source not ready")
+	s.parent.OnSourceNotReady()
+	s.parent.Log("rtmp source not ready")
 
 	return ret
 }

@@ -11,14 +11,16 @@ const (
 	address = ":9999"
 )
 
-type LogFunc func(string, ...interface{})
+type Parent interface {
+	Log(string, ...interface{})
+}
 
 type Pprof struct {
 	listener net.Listener
 	server   *http.Server
 }
 
-func New(log LogFunc) (*Pprof, error) {
+func New(parent Parent) (*Pprof, error) {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return nil, err
@@ -32,7 +34,7 @@ func New(log LogFunc) (*Pprof, error) {
 		Handler: http.DefaultServeMux,
 	}
 
-	log("[pprof] opened on " + address)
+	parent.Log("[pprof] opened on " + address)
 
 	go pp.run()
 	return pp, nil

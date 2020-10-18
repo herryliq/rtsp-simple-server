@@ -16,7 +16,9 @@ const (
 	address = ":9998"
 )
 
-type LogFunc func(string, ...interface{})
+type Parent interface {
+	Log(string, ...interface{})
+}
 
 type Metrics struct {
 	stats    *stats.Stats
@@ -25,7 +27,7 @@ type Metrics struct {
 	server   *http.Server
 }
 
-func New(log LogFunc, stats *stats.Stats) (*Metrics, error) {
+func New(stats *stats.Stats, parent Parent) (*Metrics, error) {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return nil, err
@@ -43,7 +45,7 @@ func New(log LogFunc, stats *stats.Stats) (*Metrics, error) {
 		Handler: m.mux,
 	}
 
-	log("[metrics] opened on " + address)
+	parent.Log("[metrics] opened on " + address)
 
 	go m.run()
 	return m, nil

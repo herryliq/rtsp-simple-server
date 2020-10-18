@@ -12,13 +12,12 @@ const (
 	retryInterval = 5 * time.Second
 )
 
-type LogFunc func(string, ...interface{})
-
-type OnReadyFunc func(*Source, gortsplib.Tracks)
-
-type OnNotReadyFunc func(*Source)
-
-type OnFrameFunc func(int, gortsplib.StreamType, []byte)
+type Parent interface {
+	Log(string, ...interface{})
+	OnSourceReady(gortsplib.Tracks)
+	OnSourceNotReady()
+	OnSourceFrame(int, gortsplib.StreamType, []byte)
+}
 
 type State int
 
@@ -30,14 +29,11 @@ const (
 type Source struct {
 	ur           string
 	proto        gortsplib.StreamProtocol
-	log          LogFunc
 	readTimeout  time.Duration
 	writeTimeout time.Duration
 	state        State
 	innerRunning bool
-	onReady      OnReadyFunc
-	onNotReady   OnNotReadyFunc
-	onFrame      OnFrameFunc
+	parent       Parent
 
 	innerTerminate chan struct{}
 	innerDone      chan struct{}
@@ -48,23 +44,17 @@ type Source struct {
 
 func New(ur string,
 	proto gortsplib.StreamProtocol,
-	log LogFunc,
 	readTimeout time.Duration,
 	writeTimeout time.Duration,
 	state State,
-	onReady OnReadyFunc,
-	onNotReady OnNotReadyFunc,
-	onFrame OnFrameFunc) *Source {
+	parent Parent) *Source {
 	s := &Source{
 		ur:           ur,
 		proto:        proto,
-		log:          log,
 		readTimeout:  readTimeout,
 		writeTimeout: writeTimeout,
 		state:        state,
-		onReady:      onReady,
-		onNotReady:   onNotReady,
-		onFrame:      onFrame,
+		parent:       parent,
 		stateChange:  make(chan State),
 		terminate:    make(chan struct{}),
 		done:         make(chan struct{}),
@@ -117,7 +107,7 @@ outer:
 func (s *Source) applyState(state State) {
 	if state == StateRunning {
 		if !s.innerRunning {
-			s.log("rtsp source started")
+			s.parent.Log("rtsp source started")
 			s.innerRunning = true
 			s.innerTerminate = make(chan struct{})
 			s.innerDone = make(chan struct{})
@@ -128,7 +118,7 @@ func (s *Source) applyState(state State) {
 			close(s.innerTerminate)
 			<-s.innerDone
 			s.innerRunning = false
-			s.log("rtsp source stopped")
+			s.parent.Log("rtsp source stopped")
 		}
 	}
 }
@@ -155,7 +145,7 @@ outer:
 }
 
 func (s *Source) runInnerInner() bool {
-	s.log("connecting to rtsp source")
+	s.parent.Log("connecting to rtsp source")
 
 	u, _ := url.Parse(s.ur)
 
@@ -179,21 +169,21 @@ func (s *Source) runInnerInner() bool {
 	}
 
 	if err != nil {
-		s.log("rtsp source ERR: %s", err)
+		s.parent.Log("rtsp source ERR: %s", err)
 		return true
 	}
 
 	_, err = conn.Options(u)
 	if err != nil {
 		conn.Close()
-		s.log("rtsp source ERR: %s", err)
+		s.parent.Log("rtsp source ERR: %s", err)
 		return true
 	}
 
 	tracks, _, err := conn.Describe(u)
 	if err != nil {
 		conn.Close()
-		s.log("rtsp source ERR: %s", err)
+		s.parent.Log("rtsp source ERR: %s", err)
 		return true
 	}
 
@@ -209,7 +199,7 @@ func (s *Source) runUDP(u *url.URL, conn *gortsplib.ConnClient, tracks gortsplib
 		_, err := conn.SetupUDP(u, gortsplib.TransportModePlay, track, 0, 0)
 		if err != nil {
 			conn.Close()
-			s.log("rtsp source ERR: %s", err)
+			s.parent.Log("rtsp source ERR: %s", err)
 			return true
 		}
 	}
@@ -217,12 +207,12 @@ func (s *Source) runUDP(u *url.URL, conn *gortsplib.ConnClient, tracks gortsplib
 	_, err := conn.Play(u)
 	if err != nil {
 		conn.Close()
-		s.log("rtsp source ERR: %s", err)
+		s.parent.Log("rtsp source ERR: %s", err)
 		return true
 	}
 
-	s.onReady(s, tracks)
-	s.log("rtsp source ready")
+	s.parent.OnSourceReady(tracks)
+	s.parent.Log("rtsp source ready")
 
 	var wg sync.WaitGroup
 
@@ -238,7 +228,7 @@ func (s *Source) runUDP(u *url.URL, conn *gortsplib.ConnClient, tracks gortsplib
 					break
 				}
 
-				s.onFrame(trackId, gortsplib.StreamTypeRtp, buf)
+				s.parent.OnSourceFrame(trackId, gortsplib.StreamTypeRtp, buf)
 			}
 		}(trackId)
 	}
@@ -255,7 +245,7 @@ func (s *Source) runUDP(u *url.URL, conn *gortsplib.ConnClient, tracks gortsplib
 					break
 				}
 
-				s.onFrame(trackId, gortsplib.StreamTypeRtcp, buf)
+				s.parent.OnSourceFrame(trackId, gortsplib.StreamTypeRtcp, buf)
 			}
 		}(trackId)
 	}
@@ -278,7 +268,7 @@ outer:
 
 		case err := <-tcpConnDone:
 			conn.Close()
-			s.log("rtsp source ERR: %s", err)
+			s.parent.Log("rtsp source ERR: %s", err)
 			ret = true
 			break outer
 		}
@@ -286,8 +276,8 @@ outer:
 
 	wg.Wait()
 
-	s.onNotReady(s)
-	s.log("rtsp source not ready")
+	s.parent.OnSourceNotReady()
+	s.parent.Log("rtsp source not ready")
 
 	return ret
 }
@@ -297,7 +287,7 @@ func (s *Source) runTCP(u *url.URL, conn *gortsplib.ConnClient, tracks gortsplib
 		_, err := conn.SetupTCP(u, gortsplib.TransportModePlay, track)
 		if err != nil {
 			conn.Close()
-			s.log("rtsp source ERR: %s", err)
+			s.parent.Log("rtsp source ERR: %s", err)
 			return true
 		}
 	}
@@ -305,12 +295,12 @@ func (s *Source) runTCP(u *url.URL, conn *gortsplib.ConnClient, tracks gortsplib
 	_, err := conn.Play(u)
 	if err != nil {
 		conn.Close()
-		s.log("rtsp source ERR: %s", err)
+		s.parent.Log("rtsp source ERR: %s", err)
 		return true
 	}
 
-	s.onReady(s, tracks)
-	s.log("rtsp source ready")
+	s.parent.OnSourceReady(tracks)
+	s.parent.Log("rtsp source ready")
 
 	tcpConnDone := make(chan error)
 	go func() {
@@ -321,7 +311,7 @@ func (s *Source) runTCP(u *url.URL, conn *gortsplib.ConnClient, tracks gortsplib
 				return
 			}
 
-			s.onFrame(trackId, streamType, content)
+			s.parent.OnSourceFrame(trackId, streamType, content)
 		}
 	}()
 
@@ -338,14 +328,14 @@ outer:
 
 		case err := <-tcpConnDone:
 			conn.Close()
-			s.log("rtsp source ERR: %s", err)
+			s.parent.Log("rtsp source ERR: %s", err)
 			ret = true
 			break outer
 		}
 	}
 
-	s.onNotReady(s)
-	s.log("rtsp source not ready")
+	s.parent.OnSourceNotReady()
+	s.parent.Log("rtsp source not ready")
 
 	return ret
 }

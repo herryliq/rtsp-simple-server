@@ -35,7 +35,7 @@ func MakePublisherAddr(ip net.IP, port int) PublisherAddr {
 }
 
 type Publisher interface {
-	OnUdpFramePublished(int, base.StreamType, []byte)
+	OnUdpPublisherFrame(int, base.StreamType, []byte)
 }
 
 type publisherData struct {
@@ -48,7 +48,9 @@ type bufAddrPair struct {
 	addr *net.UDPAddr
 }
 
-type LogFunc func(string, ...interface{})
+type Parent interface {
+	Log(string, ...interface{})
+}
 
 type Server struct {
 	writeTimeout    time.Duration
@@ -62,7 +64,10 @@ type Server struct {
 	done   chan struct{}
 }
 
-func New(log LogFunc, writeTimeout time.Duration, port int, streamType gortsplib.StreamType) (*Server, error) {
+func New(writeTimeout time.Duration,
+	port int,
+	streamType gortsplib.StreamType,
+	parent Parent) (*Server, error) {
 	pc, err := net.ListenUDP("udp", &net.UDPAddr{
 		Port: port,
 	})
@@ -86,7 +91,7 @@ func New(log LogFunc, writeTimeout time.Duration, port int, streamType gortsplib
 	} else {
 		label = "RTCP"
 	}
-	log("[UDP/"+label+" server] opened on :%d", port)
+	parent.Log("[UDP/"+label+" server] opened on :%d", port)
 
 	go l.run()
 	return l, nil
@@ -116,7 +121,7 @@ func (l *Server) run() {
 			continue
 		}
 
-		pub.publisher.OnUdpFramePublished(pub.trackId, l.streamType, buf[:n])
+		pub.publisher.OnUdpPublisherFrame(pub.trackId, l.streamType, buf[:n])
 	}
 
 	close(l.writec)
