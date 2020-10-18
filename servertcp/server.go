@@ -10,8 +10,9 @@ type Parent interface {
 }
 
 type Server struct {
+	parent Parent
+
 	listener *net.TCPListener
-	parent   Parent
 
 	done chan struct{}
 }
@@ -25,8 +26,8 @@ func New(port int, parent Parent) (*Server, error) {
 	}
 
 	s := &Server{
-		listener: listener,
 		parent:   parent,
+		listener: listener,
 		done:     make(chan struct{}),
 	}
 
@@ -34,6 +35,11 @@ func New(port int, parent Parent) (*Server, error) {
 
 	go s.run()
 	return s, nil
+}
+
+func (s *Server) Close() {
+	s.listener.Close()
+	<-s.done
 }
 
 func (s *Server) run() {
@@ -47,9 +53,4 @@ func (s *Server) run() {
 
 		s.parent.OnServerTCPConn(conn)
 	}
-}
-
-func (s *Server) Close() {
-	s.listener.Close()
-	<-s.done
 }

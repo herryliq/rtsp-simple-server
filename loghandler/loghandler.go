@@ -24,8 +24,9 @@ func (f writeFunc) Write(p []byte) (int, error) {
 
 type LogHandler struct {
 	destinations map[Destination]struct{}
-	file         *os.File
-	syslog       io.WriteCloser
+
+	file   *os.File
+	syslog io.WriteCloser
 }
 
 func New(destinations map[Destination]struct{}, filePath string) (*LogHandler, error) {

@@ -5,18 +5,17 @@ import (
 	"log"
 	"net"
 	"os"
-	"sync"
 	"sync/atomic"
 
 	"github.com/aler9/gortsplib"
-	"github.com/aler9/gortsplib/base"
 	"gopkg.in/alecthomas/kingpin.v2"
 
 	"github.com/aler9/rtsp-simple-server/client"
+	"github.com/aler9/rtsp-simple-server/clientman"
 	"github.com/aler9/rtsp-simple-server/conf"
 	"github.com/aler9/rtsp-simple-server/loghandler"
 	"github.com/aler9/rtsp-simple-server/metrics"
-	"github.com/aler9/rtsp-simple-server/path"
+	"github.com/aler9/rtsp-simple-server/pathman"
 	"github.com/aler9/rtsp-simple-server/pprof"
 	"github.com/aler9/rtsp-simple-server/servertcp"
 	"github.com/aler9/rtsp-simple-server/serverudp"
@@ -27,24 +26,18 @@ var Version = "v0.0.0"
 
 type program struct {
 	conf          *conf.Conf
+	stats         *stats.Stats
 	logHandler    *loghandler.LogHandler
 	metrics       *metrics.Metrics
 	pprof         *pprof.Pprof
 	serverUdpRtp  *serverudp.Server
 	serverUdpRtcp *serverudp.Server
 	serverTcp     *servertcp.Server
-	paths         map[string]*path.Path
-	pathsWg       sync.WaitGroup
-	clients       map[*client.Client]struct{}
-	clientsWg     sync.WaitGroup
-	stats         *stats.Stats
+	pathMan       *pathman.PathManager
+	clientMan     *clientman.ClientManager
 
-	pathClose       chan *path.Path
-	clientNew       chan net.Conn
-	clientClose     chan *client.Client
-	clientDescribe  chan path.ClientDescribeReq
-	clientAnnounce  chan path.ClientAnnounceReq
-	clientSetupPlay chan path.ClientSetupPlayReq
+	serverTCPConn      chan net.Conn
+	pathManClientClose chan *client.Client
 
 	terminate chan struct{}
 	done      chan struct{}
@@ -70,19 +63,14 @@ func newProgram(args []string) (*program, error) {
 	}
 
 	p := &program{
-		conf:            conf,
-		paths:           make(map[string]*path.Path),
-		clients:         make(map[*client.Client]struct{}),
-		stats:           stats.New(),
-		pathClose:       make(chan *path.Path),
-		clientNew:       make(chan net.Conn),
-		clientClose:     make(chan *client.Client),
-		clientDescribe:  make(chan path.ClientDescribeReq),
-		clientAnnounce:  make(chan path.ClientAnnounceReq),
-		clientSetupPlay: make(chan path.ClientSetupPlayReq),
-		terminate:       make(chan struct{}),
-		done:            make(chan struct{}),
+		conf:               conf,
+		serverTCPConn:      make(chan net.Conn),
+		pathManClientClose: make(chan *client.Client),
+		terminate:          make(chan struct{}),
+		done:               make(chan struct{}),
 	}
+
+	p.stats = stats.New()
 
 	p.logHandler, err = loghandler.New(conf.LogDestinationsParsed, conf.LogFile)
 	if err != nil {
@@ -130,16 +118,15 @@ func newProgram(args []string) (*program, error) {
 		return nil, err
 	}
 
-	for name, pathConf := range conf.Paths {
-		if pathConf.Regexp == nil {
-			pa := path.New(&p.pathsWg, p.stats, p.serverUdpRtp, p.serverUdpRtcp,
-				p.conf.ReadTimeout, p.conf.WriteTimeout, name, pathConf, p)
-			p.paths[name] = pa
-		}
-	}
+	p.pathMan = pathman.New(p.stats, p.serverUdpRtp, p.serverUdpRtcp,
+		p.conf.ReadTimeout, p.conf.WriteTimeout, p.conf.AuthMethodsParsed,
+		conf.Paths, p)
+
+	p.clientMan = clientman.New(p.stats, p.serverUdpRtp, p.serverUdpRtcp,
+		p.conf.ReadTimeout, p.conf.WriteTimeout, p.conf.RunOnConnect,
+		p.conf.ProtocolsParsed, p.pathMan, p)
 
 	go p.run()
-
 	return p, nil
 }
 
@@ -158,94 +145,11 @@ func (p *program) run() {
 outer:
 	for {
 		select {
-		case pa := <-p.pathClose:
-			p.onPathClose(pa)
+		case c := <-p.serverTCPConn:
+			p.clientMan.OnClientNew(c)
 
-		case conn := <-p.clientNew:
-			c := client.New(&p.clientsWg,
-				p.stats,
-				p.serverUdpRtp,
-				p.serverUdpRtcp,
-				p.conf.ReadTimeout,
-				p.conf.WriteTimeout,
-				p.conf.RunOnConnect,
-				p.conf.ProtocolsParsed,
-				conn,
-				p)
-			p.clients[c] = struct{}{}
-
-		case c := <-p.clientClose:
-			if _, ok := p.clients[c]; !ok {
-				continue
-			}
-			p.onClientClose(c)
-
-		case req := <-p.clientDescribe:
-			pathConf, err := p.findPathConf(req.PathName)
-			if err != nil {
-				req.Res <- path.ClientDescribeRes{nil, err}
-				continue
-			}
-
-			err = req.Client.Authenticate(p.conf.AuthMethodsParsed, pathConf.ReadIpsParsed,
-				pathConf.ReadUser, pathConf.ReadPass, req.Req)
-			if err != nil {
-				req.Res <- path.ClientDescribeRes{nil, err}
-				continue
-			}
-
-			// create path if it doesn't exist
-			if _, ok := p.paths[req.PathName]; !ok {
-				pa := path.New(&p.pathsWg, p.stats, p.serverUdpRtp, p.serverUdpRtcp,
-					p.conf.ReadTimeout, p.conf.WriteTimeout, req.PathName, pathConf, p)
-				p.paths[req.PathName] = pa
-			}
-
-			p.paths[req.PathName].OnProgramClientDescribe(req)
-
-		case req := <-p.clientAnnounce:
-			pathConf, err := p.findPathConf(req.PathName)
-			if err != nil {
-				req.Res <- path.ClientAnnounceRes{nil, err}
-				continue
-			}
-
-			err = req.Client.Authenticate(p.conf.AuthMethodsParsed,
-				pathConf.PublishIpsParsed, pathConf.PublishUser, pathConf.PublishPass, req.Req)
-			if err != nil {
-				req.Res <- path.ClientAnnounceRes{nil, err}
-				continue
-			}
-
-			// create path if it doesn't exist
-			if _, ok := p.paths[req.PathName]; !ok {
-				pa := path.New(&p.pathsWg, p.stats, p.serverUdpRtp, p.serverUdpRtcp,
-					p.conf.ReadTimeout, p.conf.WriteTimeout, req.PathName, pathConf, p)
-				p.paths[req.PathName] = pa
-			}
-
-			p.paths[req.PathName].OnProgramClientAnnounce(req)
-
-		case req := <-p.clientSetupPlay:
-			if _, ok := p.paths[req.PathName]; !ok {
-				req.Res <- path.ClientSetupPlayRes{nil, fmt.Errorf("no one is publishing on path '%s'", req.PathName)}
-				continue
-			}
-
-			pathConf, err := p.findPathConf(req.PathName)
-			if err != nil {
-				req.Res <- path.ClientSetupPlayRes{nil, err}
-				continue
-			}
-
-			err = req.Client.Authenticate(p.conf.AuthMethodsParsed,
-				pathConf.ReadIpsParsed, pathConf.ReadUser, pathConf.ReadPass, req.Req)
-			if err != nil {
-				req.Res <- path.ClientSetupPlayRes{nil, err}
-				continue
-			}
-
-			p.paths[req.PathName].OnProgramClientSetupPlay(req)
+		case c := <-p.pathManClientClose:
+			p.clientMan.OnClientClose(c)
 
 		case <-p.terminate:
 			break outer
@@ -259,40 +163,24 @@ func (p *program) closeResources() {
 	go func() {
 		for {
 			select {
-			case _, ok := <-p.pathClose:
-				if !ok {
-					return
-				}
-
-			case co, ok := <-p.clientNew:
+			case co, ok := <-p.serverTCPConn:
 				if !ok {
 					return
 				}
 				co.Close()
 
-			case <-p.clientClose:
-
-			case req := <-p.clientDescribe:
-				req.Res <- path.ClientDescribeRes{nil, fmt.Errorf("terminated")}
-
-			case req := <-p.clientAnnounce:
-				req.Res <- path.ClientAnnounceRes{nil, fmt.Errorf("terminated")}
-
-			case req := <-p.clientSetupPlay:
-				req.Res <- path.ClientSetupPlayRes{nil, fmt.Errorf("terminated")}
+			case <-p.pathManClientClose:
 			}
 		}
 	}()
 
-	for c := range p.clients {
-		p.onClientClose(c)
+	if p.clientMan != nil {
+		p.clientMan.Close()
 	}
-	p.clientsWg.Wait()
 
-	for _, pa := range p.paths {
-		p.onPathClose(pa)
+	if p.pathMan != nil {
+		p.pathMan.Close()
 	}
-	p.pathsWg.Wait()
 
 	if p.serverTcp != nil {
 		p.serverTcp.Close()
@@ -318,12 +206,8 @@ func (p *program) closeResources() {
 		p.logHandler.Close()
 	}
 
-	close(p.pathClose)
-	close(p.clientNew)
-	close(p.clientClose)
-	close(p.clientDescribe)
-	close(p.clientAnnounce)
-	close(p.clientSetupPlay)
+	close(p.serverTCPConn)
+	close(p.pathManClientClose)
 }
 
 func (p *program) close() {
@@ -331,72 +215,12 @@ func (p *program) close() {
 	<-p.done
 }
 
-func (p *program) findPathConf(name string) (*conf.PathConf, error) {
-	err := conf.CheckPathName(name)
-	if err != nil {
-		return nil, fmt.Errorf("invalid path name: %s (%s)", err, name)
-	}
-
-	// normal path
-	if pathConf, ok := p.conf.Paths[name]; ok {
-		return pathConf, nil
-	}
-
-	// regular expression path
-	for _, pathConf := range p.conf.Paths {
-		if pathConf.Regexp != nil && pathConf.Regexp.MatchString(name) {
-			return pathConf, nil
-		}
-	}
-
-	return nil, fmt.Errorf("unable to find a valid configuration for path '%s'", name)
-}
-
-func (p *program) onPathClose(pa *path.Path) {
-	delete(p.paths, pa.Name())
-	pa.Close()
-}
-
-func (p *program) onClientClose(c *client.Client) {
-	delete(p.clients, c)
-	c.Close()
-}
-
 func (p *program) OnServerTCPConn(conn net.Conn) {
-	p.clientNew <- conn
+	p.serverTCPConn <- conn
 }
 
-func (p *program) OnPathClose(pa *path.Path) {
-	p.pathClose <- pa
-}
-
-func (p *program) OnPathClientClose(c *client.Client) {
-	p.clientClose <- c
-}
-
-func (p *program) OnClientClose(c *client.Client) {
-	p.clientClose <- c
-}
-
-func (p *program) OnClientDescribe(c *client.Client, pathName string, req *base.Request) (client.Path, error) {
-	res := make(chan path.ClientDescribeRes)
-	p.clientDescribe <- path.ClientDescribeReq{res, c, pathName, req}
-	re := <-res
-	return re.Path, re.Err
-}
-
-func (p *program) OnClientAnnounce(c *client.Client, pathName string, tracks gortsplib.Tracks, req *base.Request) (client.Path, error) {
-	res := make(chan path.ClientAnnounceRes)
-	p.clientAnnounce <- path.ClientAnnounceReq{res, c, pathName, tracks, req}
-	re := <-res
-	return re.Path, re.Err
-}
-
-func (p *program) OnClientSetupPlay(c *client.Client, basePath string, trackId int, req *base.Request) (client.Path, error) {
-	res := make(chan path.ClientSetupPlayRes)
-	p.clientSetupPlay <- path.ClientSetupPlayReq{res, c, basePath, trackId, req}
-	re := <-res
-	return re.Path, re.Err
+func (p *program) OnPathManClientClose(c *client.Client) {
+	p.pathManClientClose <- c
 }
 
 func main() {

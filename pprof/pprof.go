@@ -40,13 +40,13 @@ func New(parent Parent) (*Pprof, error) {
 	return pp, nil
 }
 
+func (pp *Pprof) Close() {
+	pp.server.Shutdown(context.Background())
+}
+
 func (pp *Pprof) run() {
 	err := pp.server.Serve(pp.listener)
 	if err != http.ErrServerClosed {
 		panic(err)
 	}
-}
-
-func (pp *Pprof) Close() {
-	pp.server.Shutdown(context.Background())
 }

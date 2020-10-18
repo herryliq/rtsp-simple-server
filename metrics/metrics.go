@@ -21,7 +21,8 @@ type Parent interface {
 }
 
 type Metrics struct {
-	stats    *stats.Stats
+	stats *stats.Stats
+
 	listener net.Listener
 	mux      *http.ServeMux
 	server   *http.Server
@@ -51,15 +52,15 @@ func New(stats *stats.Stats, parent Parent) (*Metrics, error) {
 	return m, nil
 }
 
+func (m *Metrics) Close() {
+	m.server.Shutdown(context.Background())
+}
+
 func (m *Metrics) run() {
 	err := m.server.Serve(m.listener)
 	if err != http.ErrServerClosed {
 		panic(err)
 	}
-}
-
-func (m *Metrics) Close() {
-	m.server.Shutdown(context.Background())
 }
 
 func (m *Metrics) onMetrics(w http.ResponseWriter, req *http.Request) {

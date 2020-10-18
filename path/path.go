@@ -101,14 +101,16 @@ const (
 )
 
 type Path struct {
-	wg                     *sync.WaitGroup
-	stats                  *stats.Stats
-	serverUdpRtp           *serverudp.Server
-	serverUdpRtcp          *serverudp.Server
-	readTimeout            time.Duration
-	writeTimeout           time.Duration
-	name                   string
-	conf                   *conf.PathConf
+	wg            *sync.WaitGroup
+	stats         *stats.Stats
+	serverUdpRtp  *serverudp.Server
+	serverUdpRtcp *serverudp.Server
+	readTimeout   time.Duration
+	writeTimeout  time.Duration
+	name          string
+	conf          *conf.PathConf
+	parent        Parent
+
 	clients                map[*client.Client]clientState
 	source                 source
 	sourceReady            bool
@@ -119,7 +121,6 @@ type Path struct {
 	readers                *readersMap
 	onInitCmd              *externalcmd.ExternalCmd
 	onDemandCmd            *externalcmd.ExternalCmd
-	parent                 Parent
 
 	sourceSetReady    chan struct{}           // from source
 	sourceSetNotReady chan struct{}           // from source
@@ -152,9 +153,9 @@ func New(
 		writeTimeout:      writeTimeout,
 		name:              name,
 		conf:              conf,
+		parent:            parent,
 		clients:           make(map[*client.Client]clientState),
 		readers:           newReadersMap(),
-		parent:            parent,
 		sourceSetReady:    make(chan struct{}),
 		sourceSetNotReady: make(chan struct{}),
 		clientDescribe:    make(chan ClientDescribeReq),
@@ -623,15 +624,15 @@ func (pa *Path) Conf() *conf.PathConf {
 	return pa.conf
 }
 
-func (pa *Path) OnProgramClientDescribe(req ClientDescribeReq) {
+func (pa *Path) OnPathManDescribe(req ClientDescribeReq) {
 	pa.clientDescribe <- req
 }
 
-func (pa *Path) OnProgramClientSetupPlay(req ClientSetupPlayReq) {
+func (pa *Path) OnPathManSetupPlay(req ClientSetupPlayReq) {
 	pa.clientSetupPlay <- req
 }
 
-func (pa *Path) OnProgramClientAnnounce(req ClientAnnounceReq) {
+func (pa *Path) OnPathManAnnounce(req ClientAnnounceReq) {
 	pa.clientAnnounce <- req
 }
 

@@ -32,8 +32,9 @@ type Source struct {
 	readTimeout  time.Duration
 	writeTimeout time.Duration
 	state        State
-	innerRunning bool
 	parent       Parent
+
+	innerRunning bool
 
 	innerTerminate chan struct{}
 	innerDone      chan struct{}
@@ -64,6 +65,11 @@ func New(ur string,
 	return s
 }
 
+func (s *Source) Close() {
+	close(s.terminate)
+	<-s.done
+}
+
 func (s *Source) IsSource() {}
 
 func (s *Source) State() State {
@@ -73,11 +79,6 @@ func (s *Source) State() State {
 func (s *Source) SetState(state State) {
 	s.state = state
 	s.stateChange <- s.state
-}
-
-func (s *Source) Close() {
-	close(s.terminate)
-	<-s.done
 }
 
 func (s *Source) run(initialState State) {

@@ -53,9 +53,10 @@ type Parent interface {
 }
 
 type Server struct {
-	writeTimeout    time.Duration
+	writeTimeout time.Duration
+	streamType   gortsplib.StreamType
+
 	pc              *net.UDPConn
-	streamType      gortsplib.StreamType
 	readBuf         *multibuffer.MultiBuffer
 	publishersMutex sync.RWMutex
 	publishers      map[PublisherAddr]*publisherData
@@ -75,8 +76,8 @@ func New(writeTimeout time.Duration, port int,
 
 	s := &Server{
 		writeTimeout: writeTimeout,
-		pc:           pc,
 		streamType:   streamType,
+		pc:           pc,
 		readBuf:      multibuffer.New(2, readBufferSize),
 		publishers:   make(map[PublisherAddr]*publisherData),
 		writec:       make(chan bufAddrPair),
@@ -93,6 +94,11 @@ func New(writeTimeout time.Duration, port int,
 
 	go s.run()
 	return s, nil
+}
+
+func (s *Server) Close() {
+	s.pc.Close()
+	<-s.done
 }
 
 func (s *Server) run() {
@@ -124,11 +130,6 @@ func (s *Server) run() {
 
 	close(s.writec)
 	<-writeDone
-}
-
-func (s *Server) Close() {
-	s.pc.Close()
-	<-s.done
 }
 
 func (s *Server) Port() int {

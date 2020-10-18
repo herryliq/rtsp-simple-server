@@ -96,14 +96,16 @@ type Parent interface {
 }
 
 type Client struct {
-	wg                *sync.WaitGroup
-	stats             *stats.Stats
-	serverUdpRtp      *serverudp.Server
-	serverUdpRtcp     *serverudp.Server
-	readTimeout       time.Duration
-	runOnConnect      string
-	protocols         map[gortsplib.StreamProtocol]struct{}
-	conn              *gortsplib.ConnServer
+	wg            *sync.WaitGroup
+	stats         *stats.Stats
+	serverUdpRtp  *serverudp.Server
+	serverUdpRtcp *serverudp.Server
+	readTimeout   time.Duration
+	runOnConnect  string
+	protocols     map[gortsplib.StreamProtocol]struct{}
+	conn          *gortsplib.ConnServer
+	parent        Parent
+
 	state             state
 	path              Path
 	authUser          string
@@ -116,7 +118,6 @@ type Client struct {
 	udpLastFrameTimes []*int64
 	describeCSeq      base.HeaderValue
 	describeUrl       string
-	parent            Parent
 
 	describeData chan describeData           // from path
 	tcpFrame     chan *base.InterleavedFrame // from source
@@ -149,9 +150,9 @@ func New(
 			WriteTimeout:    writeTimeout,
 			ReadBufferCount: 2,
 		}),
+		parent:       parent,
 		state:        stateInitial,
 		streamTracks: make(map[int]*streamTrack),
-		parent:       parent,
 		describeData: make(chan describeData),
 		tcpFrame:     make(chan *base.InterleavedFrame),
 		terminate:    make(chan struct{}),
