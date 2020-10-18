@@ -131,12 +131,12 @@ func newProgram(args []string) (*program, error) {
 }
 
 func (p *program) Log(format string, args ...interface{}) {
-	CountClients := atomic.LoadInt64(p.stats.CountClients)
-	CountPublishers := atomic.LoadInt64(p.stats.CountPublishers)
-	CountReaders := atomic.LoadInt64(p.stats.CountReaders)
+	countClients := atomic.LoadInt64(p.stats.CountClients)
+	countPublishers := atomic.LoadInt64(p.stats.CountPublishers)
+	countReaders := atomic.LoadInt64(p.stats.CountReaders)
 
-	log.Printf(fmt.Sprintf("[%d/%d/%d] "+format, append([]interface{}{CountClients,
-		CountPublishers, CountReaders}, args...)...))
+	log.Printf(fmt.Sprintf("[%d/%d/%d] "+format, append([]interface{}{countClients,
+		countPublishers, countReaders}, args...)...))
 }
 
 func (p *program) run() {

@@ -66,29 +66,29 @@ func (m *Metrics) run() {
 func (m *Metrics) onMetrics(w http.ResponseWriter, req *http.Request) {
 	now := time.Now().UnixNano() / 1000000
 
-	CountClients := atomic.LoadInt64(m.stats.CountClients)
-	CountPublishers := atomic.LoadInt64(m.stats.CountPublishers)
-	CountReaders := atomic.LoadInt64(m.stats.CountReaders)
-	CountSourcesRtsp := atomic.LoadInt64(m.stats.CountSourcesRtsp)
-	CountSourcesRtspRunning := atomic.LoadInt64(m.stats.CountSourcesRtspRunning)
-	CountSourcesRtmp := atomic.LoadInt64(m.stats.CountSourcesRtmp)
-	CountSourcesRtmpRunning := atomic.LoadInt64(m.stats.CountSourcesRtmpRunning)
+	countClients := atomic.LoadInt64(m.stats.CountClients)
+	countPublishers := atomic.LoadInt64(m.stats.CountPublishers)
+	countReaders := atomic.LoadInt64(m.stats.CountReaders)
+	countSourcesRtsp := atomic.LoadInt64(m.stats.CountSourcesRtsp)
+	countSourcesRtspRunning := atomic.LoadInt64(m.stats.CountSourcesRtspRunning)
+	countSourcesRtmp := atomic.LoadInt64(m.stats.CountSourcesRtmp)
+	countSourcesRtmpRunning := atomic.LoadInt64(m.stats.CountSourcesRtmpRunning)
 
 	out := ""
 	out += fmt.Sprintf("rtsp_clients{state=\"idle\"} %d %v\n",
-		CountClients-CountPublishers-CountReaders, now)
+		countClients-countPublishers-countReaders, now)
 	out += fmt.Sprintf("rtsp_clients{state=\"publishing\"} %d %v\n",
-		CountPublishers, now)
+		countPublishers, now)
 	out += fmt.Sprintf("rtsp_clients{state=\"reading\"} %d %v\n",
-		CountReaders, now)
+		countReaders, now)
 	out += fmt.Sprintf("rtsp_sources{type=\"rtsp\",state=\"idle\"} %d %v\n",
-		CountSourcesRtsp-CountSourcesRtspRunning, now)
+		countSourcesRtsp-countSourcesRtspRunning, now)
 	out += fmt.Sprintf("rtsp_sources{type=\"rtsp\",state=\"running\"} %d %v\n",
-		CountSourcesRtspRunning, now)
+		countSourcesRtspRunning, now)
 	out += fmt.Sprintf("rtsp_sources{type=\"rtmp\",state=\"idle\"} %d %v\n",
-		CountSourcesRtmp-CountSourcesRtmpRunning, now)
+		countSourcesRtmp-countSourcesRtmpRunning, now)
 	out += fmt.Sprintf("rtsp_sources{type=\"rtmp\",state=\"running\"} %d %v\n",
-		CountSourcesRtmpRunning, now)
+		countSourcesRtmpRunning, now)
 
 	w.WriteHeader(http.StatusOK)
 	io.WriteString(w, out)
