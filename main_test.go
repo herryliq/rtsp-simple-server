@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"testing"
 	"time"
@@ -142,11 +143,19 @@ func TestEnvironment(t *testing.T) {
 	os.Setenv("RTSP_PATHS_TEST2", "")
 	defer os.Unsetenv("RTSP_PATHS_TEST2")
 
-	// map value
-	os.Setenv("RTSP_PATHS_TEST_SOURCE", "rtsp://testing")
-	defer os.Unsetenv("RTSP_PATHS_TEST_SOURCE")
-	os.Setenv("RTSP_PATHS_TEST_SOURCEPROTOCOL", "tcp")
-	defer os.Unsetenv("RTSP_PATHS_TEST_SOURCEPROTOCOL")
+	// map values, "all" path
+	os.Setenv("RTSP_PATHS_ALL_READUSER", "testuser")
+	defer os.Unsetenv("RTSP_PATHS_ALL_READUSER")
+	os.Setenv("RTSP_PATHS_ALL_READPASS", "testpass")
+	defer os.Unsetenv("RTSP_PATHS_ALL_READPASS")
+
+	// map values, generic path
+	os.Setenv("RTSP_PATHS_CAM1_SOURCE", "rtsp://testing")
+	defer os.Unsetenv("RTSP_PATHS_CAM1_SOURCE")
+	os.Setenv("RTSP_PATHS_CAM1_SOURCEPROTOCOL", "tcp")
+	defer os.Unsetenv("RTSP_PATHS_CAM1_SOURCEPROTOCOL")
+	os.Setenv("RTSP_PATHS_CAM1_SOURCEONDEMAND", "yes")
+	defer os.Unsetenv("RTSP_PATHS_CAM1_SOURCEONDEMAND")
 
 	p, err := testProgram("")
 	require.NoError(t, err)
@@ -168,12 +177,43 @@ func TestEnvironment(t *testing.T) {
 		Source: "record",
 	}, pa)
 
-	pa, ok = p.conf.Paths["test"]
+	pa, ok = p.conf.Paths["~^.*$"]
+	require.Equal(t, true, ok)
+	require.Equal(t, &conf.PathConf{
+		Regexp:         regexp.MustCompile("^.*$"),
+		Source:         "record",
+		SourceProtocol: "udp",
+		ReadUser:       "testuser",
+		ReadPass:       "testpass",
+	}, pa)
+
+	pa, ok = p.conf.Paths["cam1"]
 	require.Equal(t, true, ok)
 	require.Equal(t, &conf.PathConf{
 		Source:               "rtsp://testing",
 		SourceProtocol:       "tcp",
 		SourceProtocolParsed: gortsplib.StreamProtocolTCP,
+		SourceOnDemand:       true,
+	}, pa)
+}
+
+func TestEnvironmentNoFile(t *testing.T) {
+	os.Setenv("RTSP_PATHS_CAM1_SOURCE", "rtsp://testing")
+	defer os.Unsetenv("RTSP_PATHS_CAM1_SOURCE")
+
+	p, err := testProgram("{}")
+	require.NoError(t, err)
+	defer p.close()
+
+	pa, ok := p.conf.Paths["cam1"]
+	require.Equal(t, true, ok)
+	require.Equal(t, &conf.PathConf{
+		Source: "rtsp://testing",
+		SourceUrl: func() *url.URL {
+			u, _ := url.Parse("rtsp://testing:554")
+			return u
+		}(),
+		SourceProtocol: "udp",
 	}, pa)
 }
 
