@@ -64,10 +64,8 @@ type Server struct {
 	done   chan struct{}
 }
 
-func New(writeTimeout time.Duration,
-	port int,
-	streamType gortsplib.StreamType,
-	parent Parent) (*Server, error) {
+func New(writeTimeout time.Duration, port int,
+	streamType gortsplib.StreamType, parent Parent) (*Server, error) {
 	pc, err := net.ListenUDP("udp", &net.UDPAddr{
 		Port: port,
 	})
@@ -75,7 +73,7 @@ func New(writeTimeout time.Duration,
 		return nil, err
 	}
 
-	l := &Server{
+	s := &Server{
 		writeTimeout: writeTimeout,
 		pc:           pc,
 		streamType:   streamType,
@@ -86,79 +84,83 @@ func New(writeTimeout time.Duration,
 	}
 
 	var label string
-	if l.streamType == gortsplib.StreamTypeRtp {
+	if s.streamType == gortsplib.StreamTypeRtp {
 		label = "RTP"
 	} else {
 		label = "RTCP"
 	}
 	parent.Log("[UDP/"+label+" server] opened on :%d", port)
 
-	go l.run()
-	return l, nil
+	go s.run()
+	return s, nil
 }
 
-func (l *Server) run() {
-	defer close(l.done)
+func (s *Server) run() {
+	defer close(s.done)
 
 	writeDone := make(chan struct{})
 	go func() {
 		defer close(writeDone)
-		for w := range l.writec {
-			l.pc.SetWriteDeadline(time.Now().Add(l.writeTimeout))
-			l.pc.WriteTo(w.buf, w.addr)
+		for w := range s.writec {
+			s.pc.SetWriteDeadline(time.Now().Add(s.writeTimeout))
+			s.pc.WriteTo(w.buf, w.addr)
 		}
 	}()
 
 	for {
-		buf := l.readBuf.Next()
-		n, addr, err := l.pc.ReadFromUDP(buf)
+		buf := s.readBuf.Next()
+		n, addr, err := s.pc.ReadFromUDP(buf)
 		if err != nil {
 			break
 		}
 
-		pub := l.getPublisher(MakePublisherAddr(addr.IP, addr.Port))
+		pub := s.getPublisher(MakePublisherAddr(addr.IP, addr.Port))
 		if pub == nil {
 			continue
 		}
 
-		pub.publisher.OnUdpPublisherFrame(pub.trackId, l.streamType, buf[:n])
+		pub.publisher.OnUdpPublisherFrame(pub.trackId, s.streamType, buf[:n])
 	}
 
-	close(l.writec)
+	close(s.writec)
 	<-writeDone
 }
 
-func (l *Server) Close() {
-	l.pc.Close()
-	<-l.done
+func (s *Server) Close() {
+	s.pc.Close()
+	<-s.done
 }
 
-func (l *Server) Write(data []byte, addr *net.UDPAddr) {
-	l.writec <- bufAddrPair{data, addr}
+func (s *Server) Port() int {
+	return s.pc.LocalAddr().(*net.UDPAddr).Port
 }
 
-func (l *Server) AddPublisher(addr PublisherAddr, publisher Publisher, trackId int) {
-	l.publishersMutex.Lock()
-	defer l.publishersMutex.Unlock()
+func (s *Server) Write(data []byte, addr *net.UDPAddr) {
+	s.writec <- bufAddrPair{data, addr}
+}
 
-	l.publishers[addr] = &publisherData{
+func (s *Server) AddPublisher(addr PublisherAddr, publisher Publisher, trackId int) {
+	s.publishersMutex.Lock()
+	defer s.publishersMutex.Unlock()
+
+	s.publishers[addr] = &publisherData{
 		publisher: publisher,
 		trackId:   trackId,
 	}
 }
 
-func (l *Server) RemovePublisher(addr PublisherAddr) {
-	l.publishersMutex.Lock()
-	defer l.publishersMutex.Unlock()
+func (s *Server) RemovePublisher(addr PublisherAddr) {
+	s.publishersMutex.Lock()
+	defer s.publishersMutex.Unlock()
 
-	delete(l.publishers, addr)
+	delete(s.publishers, addr)
 }
 
-func (l *Server) getPublisher(addr PublisherAddr) *publisherData {
-	l.publishersMutex.RLock()
-	defer l.publishersMutex.RUnlock()
+func (s *Server) getPublisher(addr PublisherAddr) *publisherData {
+	s.publishersMutex.RLock()
+	defer s.publishersMutex.RUnlock()
 
-	el, ok := l.publishers[addr]
+	el, ok := s.publishers[addr]
 	if !ok {
 		return nil
 	}

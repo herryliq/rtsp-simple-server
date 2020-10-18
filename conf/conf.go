@@ -16,28 +16,6 @@ import (
 	"github.com/aler9/rtsp-simple-server/loghandler"
 )
 
-var rePathName = regexp.MustCompile("^[0-9a-zA-Z_\\-/]+$")
-
-func checkPathName(name string) error {
-	if name == "" {
-		return fmt.Errorf("cannot be empty")
-	}
-
-	if name[0] == '/' {
-		return fmt.Errorf("can't begin with a slash")
-	}
-
-	if name[len(name)-1] == '/' {
-		return fmt.Errorf("can't end with a slash")
-	}
-
-	if !rePathName.MatchString(name) {
-		return fmt.Errorf("can contain only alfanumeric characters, underscore, minus or slash")
-	}
-
-	return nil
-}
-
 type PathConf struct {
 	Regexp               *regexp.Regexp           `yaml:"-"`
 	Source               string                   `yaml:"source"`

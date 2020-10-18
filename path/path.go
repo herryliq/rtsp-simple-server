@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/aler9/gortsplib"
+	"github.com/aler9/gortsplib/base"
 
 	"github.com/aler9/rtsp-simple-server/client"
 	"github.com/aler9/rtsp-simple-server/conf"
@@ -45,7 +46,7 @@ type ClientDescribeReq struct {
 	Res      chan ClientDescribeRes
 	Client   *client.Client
 	PathName string
-	PathConf *conf.PathConf
+	Req      *base.Request
 }
 
 type ClientAnnounceRes struct {
@@ -57,8 +58,8 @@ type ClientAnnounceReq struct {
 	Res      chan ClientAnnounceRes
 	Client   *client.Client
 	PathName string
-	PathConf *conf.PathConf
 	Tracks   gortsplib.Tracks
+	Req      *base.Request
 }
 
 type ClientSetupPlayRes struct {
@@ -71,6 +72,7 @@ type ClientSetupPlayReq struct {
 	Client   *client.Client
 	PathName string
 	TrackId  int
+	Req      *base.Request
 }
 
 type clientRemoveReq struct {
@@ -140,6 +142,7 @@ func New(
 	name string,
 	conf *conf.PathConf,
 	parent Parent) *Path {
+
 	pa := &Path{
 		wg:                wg,
 		stats:             stats,

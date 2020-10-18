@@ -90,17 +90,19 @@ type Path interface {
 type Parent interface {
 	Log(string, ...interface{})
 	OnClientClose(*Client)
-	OnClientDescribe(*Client, string, *conf.PathConf) (Path, error)
-	OnClientAnnounce(*Client, string, *conf.PathConf, gortsplib.Tracks) (Path, error)
-	OnClientSetupPlay(*Client, string, int) (Path, error)
+	OnClientDescribe(*Client, string, *base.Request) (Path, error)
+	OnClientAnnounce(*Client, string, gortsplib.Tracks, *base.Request) (Path, error)
+	OnClientSetupPlay(*Client, string, int, *base.Request) (Path, error)
 }
 
 type Client struct {
 	wg                *sync.WaitGroup
 	stats             *stats.Stats
-	conf              *conf.Conf
 	serverUdpRtp      *serverudp.Server
 	serverUdpRtcp     *serverudp.Server
+	readTimeout       time.Duration
+	runOnConnect      string
+	protocols         map[gortsplib.StreamProtocol]struct{}
 	conn              *gortsplib.ConnServer
 	state             state
 	path              Path
@@ -124,21 +126,27 @@ type Client struct {
 func New(
 	wg *sync.WaitGroup,
 	stats *stats.Stats,
-	conf *conf.Conf,
 	serverUdpRtp *serverudp.Server,
 	serverUdpRtcp *serverudp.Server,
+	readTimeout time.Duration,
+	writeTimeout time.Duration,
+	runOnConnect string,
+	protocols map[gortsplib.StreamProtocol]struct{},
 	nconn net.Conn,
 	parent Parent) *Client {
+
 	c := &Client{
 		wg:            wg,
 		stats:         stats,
-		conf:          conf,
 		serverUdpRtp:  serverUdpRtp,
 		serverUdpRtcp: serverUdpRtcp,
+		readTimeout:   readTimeout,
+		runOnConnect:  runOnConnect,
+		protocols:     protocols,
 		conn: gortsplib.NewConnServer(gortsplib.ConnServerConf{
 			Conn:            nconn,
-			ReadTimeout:     conf.ReadTimeout,
-			WriteTimeout:    conf.WriteTimeout,
+			ReadTimeout:     readTimeout,
+			WriteTimeout:    writeTimeout,
 			ReadBufferCount: 2,
 		}),
 		state:        stateInitial,
@@ -186,9 +194,9 @@ func (c *Client) run() {
 	defer c.log("disconnected")
 
 	var onConnectCmd *externalcmd.ExternalCmd
-	if c.conf.RunOnConnect != "" {
+	if c.runOnConnect != "" {
 		var err error
-		onConnectCmd, err = externalcmd.New(c.conf.RunOnConnect, "")
+		onConnectCmd, err = externalcmd.New(c.runOnConnect, "")
 		if err != nil {
 			c.log("ERR: %s", err)
 		}
@@ -219,39 +227,47 @@ func (c *Client) writeResError(cseq base.HeaderValue, code base.StatusCode, err 
 	})
 }
 
-var errAuthCritical = errors.New("auth critical")
-var errAuthNotCritical = errors.New("auth not critical")
+type ErrAuthNotCritical struct {
+	*base.Response
+}
 
-func (c *Client) authenticate(ips []interface{}, user string, pass string, req *base.Request) error {
+func (ErrAuthNotCritical) Error() string {
+	return "auth not critical"
+}
+
+type ErrAuthCritical struct {
+	*base.Response
+}
+
+func (ErrAuthCritical) Error() string {
+	return "auth critical"
+}
+
+func (c *Client) Authenticate(authMethods []headers.AuthMethod, ips []interface{}, user string, pass string, req *base.Request) error {
 	// validate ip
-	err := func() error {
-		if ips == nil {
-			return nil
-		}
-
+	if ips != nil {
 		ip := c.ip()
+
 		if !ipEqualOrInRange(ip, ips) {
 			c.log("ERR: ip '%s' not allowed", ip)
-			return errAuthCritical
-		}
 
-		return nil
-	}()
-	if err != nil {
-		return err
+			return ErrAuthCritical{&base.Response{
+				StatusCode: base.StatusUnauthorized,
+				Header: base.Header{
+					"CSeq":             req.Header["CSeq"],
+					"WWW-Authenticate": c.authHelper.GenerateHeader(),
+				},
+			}}
+		}
 	}
 
-	// validate credentials
-	err = func() error {
-		if user == "" {
-			return nil
-		}
-
+	// validate user
+	if user != "" {
 		// reset authHelper every time the credentials change
 		if c.authHelper == nil || c.authUser != user || c.authPass != pass {
 			c.authUser = user
 			c.authPass = pass
-			c.authHelper = auth.NewServer(user, pass, c.conf.AuthMethodsParsed)
+			c.authHelper = auth.NewServer(user, pass, authMethods)
 		}
 
 		err := c.authHelper.ValidateHeader(req.Header["Authorization"], req.Method, req.Url)
@@ -264,38 +280,35 @@ func (c *Client) authenticate(ips []interface{}, user string, pass string, req *
 			// 3) without credentials
 			// 4) with password and username
 			// hence we must allow up to 3 failures
-			var retErr error
 			if c.authFailures > 3 {
 				c.log("ERR: unauthorized: %s", err)
-				retErr = errAuthCritical
 
-			} else if c.authFailures > 1 {
-				c.log("WARN: unauthorized: %s", err)
-				retErr = errAuthNotCritical
+				return ErrAuthCritical{&base.Response{
+					StatusCode: base.StatusUnauthorized,
+					Header: base.Header{
+						"CSeq":             req.Header["CSeq"],
+						"WWW-Authenticate": c.authHelper.GenerateHeader(),
+					},
+				}}
 
 			} else {
-				retErr = errAuthNotCritical
+				if c.authFailures > 1 {
+					c.log("WARN: unauthorized: %s", err)
+				}
+
+				return ErrAuthNotCritical{&base.Response{
+					StatusCode: base.StatusUnauthorized,
+					Header: base.Header{
+						"CSeq":             req.Header["CSeq"],
+						"WWW-Authenticate": c.authHelper.GenerateHeader(),
+					},
+				}}
 			}
-
-			c.conn.WriteResponse(&base.Response{
-				StatusCode: base.StatusUnauthorized,
-				Header: base.Header{
-					"CSeq":             req.Header["CSeq"],
-					"WWW-Authenticate": c.authHelper.GenerateHeader(),
-				},
-			})
-
-			return retErr
 		}
-
-		// reset authFailures after a successful login
-		c.authFailures = 0
-
-		return nil
-	}()
-	if err != nil {
-		return err
 	}
+
+	// login successful, reset authFailures
+	c.authFailures = 0
 
 	return nil
 }
@@ -362,25 +375,23 @@ func (c *Client) handleRequest(req *base.Request) error {
 
 		pathName = removeQueryFromPath(pathName)
 
-		pathConf, err := c.conf.CheckPathNameAndFindConf(pathName)
+		path, err := c.parent.OnClientDescribe(c, pathName, req)
 		if err != nil {
-			c.writeResError(cseq, base.StatusBadRequest, err)
-			return errRunTerminate
-		}
+			switch terr := err.(type) {
+			case ErrAuthNotCritical:
+				c.conn.WriteResponse(terr.Response)
+				return nil
 
-		err = c.authenticate(pathConf.ReadIpsParsed, pathConf.ReadUser, pathConf.ReadPass, req)
-		if err != nil {
-			if err == errAuthCritical {
+			case ErrAuthCritical:
+				c.conn.WriteResponse(terr.Response)
+				return errRunTerminate
+
+			default:
+				c.writeResError(cseq, base.StatusBadRequest, err)
 				return errRunTerminate
 			}
-			return nil
 		}
 
-		path, err := c.parent.OnClientDescribe(c, pathName, pathConf)
-		if err != nil {
-			c.writeResError(cseq, base.StatusBadRequest, err)
-			return errRunTerminate
-		}
 		c.path = path
 		c.state = stateWaitingDescribe
 		c.describeCSeq = cseq
@@ -393,22 +404,6 @@ func (c *Client) handleRequest(req *base.Request) error {
 			c.writeResError(cseq, base.StatusBadRequest,
 				fmt.Errorf("client is in state '%s' instead of '%s'", c.state, stateInitial))
 			return errRunTerminate
-		}
-
-		pathName = removeQueryFromPath(pathName)
-
-		pathConf, err := c.conf.CheckPathNameAndFindConf(pathName)
-		if err != nil {
-			c.writeResError(cseq, base.StatusBadRequest, err)
-			return errRunTerminate
-		}
-
-		err = c.authenticate(pathConf.PublishIpsParsed, pathConf.PublishUser, pathConf.PublishPass, req)
-		if err != nil {
-			if err == errAuthCritical {
-				return errRunTerminate
-			}
-			return nil
 		}
 
 		ct, ok := req.Header["Content-Type"]
@@ -433,10 +428,23 @@ func (c *Client) handleRequest(req *base.Request) error {
 			return errRunTerminate
 		}
 
-		path, err := c.parent.OnClientAnnounce(c, pathName, pathConf, tracks)
+		pathName = removeQueryFromPath(pathName)
+
+		path, err := c.parent.OnClientAnnounce(c, pathName, tracks, req)
 		if err != nil {
-			c.writeResError(cseq, base.StatusBadRequest, err)
-			return errRunTerminate
+			switch terr := err.(type) {
+			case ErrAuthNotCritical:
+				c.conn.WriteResponse(terr.Response)
+				return nil
+
+			case ErrAuthCritical:
+				c.conn.WriteResponse(terr.Response)
+				return errRunTerminate
+
+			default:
+				c.writeResError(cseq, base.StatusBadRequest, err)
+				return errRunTerminate
+			}
 		}
 		c.path = path
 		c.state = statePreRecord
@@ -477,20 +485,6 @@ func (c *Client) handleRequest(req *base.Request) error {
 				return errRunTerminate
 			}
 
-			pathConf, err := c.conf.CheckPathNameAndFindConf(basePath)
-			if err != nil {
-				c.writeResError(cseq, base.StatusBadRequest, err)
-				return errRunTerminate
-			}
-
-			err = c.authenticate(pathConf.ReadIpsParsed, pathConf.ReadUser, pathConf.ReadPass, req)
-			if err != nil {
-				if err == errAuthCritical {
-					return errRunTerminate
-				}
-				return nil
-			}
-
 			if c.path != nil && basePath != c.path.Name() {
 				c.writeResError(cseq, base.StatusBadRequest, fmt.Errorf("path has changed, was '%s', now is '%s'", c.path.Name(), basePath))
 				return errRunTerminate
@@ -515,7 +509,7 @@ func (c *Client) handleRequest(req *base.Request) error {
 
 			// play with UDP
 			if th.Protocol == gortsplib.StreamProtocolUDP {
-				if _, ok := c.conf.ProtocolsParsed[gortsplib.StreamProtocolUDP]; !ok {
+				if _, ok := c.protocols[gortsplib.StreamProtocolUDP]; !ok {
 					c.writeResError(cseq, base.StatusUnsupportedTransport, fmt.Errorf("UDP streaming is disabled"))
 					return errRunTerminate
 				}
@@ -530,11 +524,23 @@ func (c *Client) handleRequest(req *base.Request) error {
 					return errRunTerminate
 				}
 
-				path, err := c.parent.OnClientSetupPlay(c, basePath, trackId)
+				path, err := c.parent.OnClientSetupPlay(c, basePath, trackId, req)
 				if err != nil {
-					c.writeResError(cseq, base.StatusBadRequest, err)
-					return errRunTerminate
+					switch terr := err.(type) {
+					case ErrAuthNotCritical:
+						c.conn.WriteResponse(terr.Response)
+						return nil
+
+					case ErrAuthCritical:
+						c.conn.WriteResponse(terr.Response)
+						return errRunTerminate
+
+					default:
+						c.writeResError(cseq, base.StatusBadRequest, err)
+						return errRunTerminate
+					}
 				}
+
 				c.path = path
 				c.state = statePrePlay
 
@@ -551,7 +557,7 @@ func (c *Client) handleRequest(req *base.Request) error {
 						return &v
 					}(),
 					ClientPorts: th.ClientPorts,
-					ServerPorts: &[2]int{c.conf.RtpPort, c.conf.RtcpPort},
+					ServerPorts: &[2]int{c.serverUdpRtp.Port(), c.serverUdpRtcp.Port()},
 				}
 
 				c.conn.WriteResponse(&base.Response{
@@ -566,7 +572,7 @@ func (c *Client) handleRequest(req *base.Request) error {
 
 				// play with TCP
 			} else {
-				if _, ok := c.conf.ProtocolsParsed[gortsplib.StreamProtocolTCP]; !ok {
+				if _, ok := c.protocols[gortsplib.StreamProtocolTCP]; !ok {
 					c.writeResError(cseq, base.StatusUnsupportedTransport, fmt.Errorf("TCP streaming is disabled"))
 					return errRunTerminate
 				}
@@ -576,11 +582,23 @@ func (c *Client) handleRequest(req *base.Request) error {
 					return errRunTerminate
 				}
 
-				path, err := c.parent.OnClientSetupPlay(c, basePath, trackId)
+				path, err := c.parent.OnClientSetupPlay(c, basePath, trackId, req)
 				if err != nil {
-					c.writeResError(cseq, base.StatusBadRequest, err)
-					return errRunTerminate
+					switch terr := err.(type) {
+					case ErrAuthNotCritical:
+						c.conn.WriteResponse(terr.Response)
+						return nil
+
+					case ErrAuthCritical:
+						c.conn.WriteResponse(terr.Response)
+						return errRunTerminate
+
+					default:
+						c.writeResError(cseq, base.StatusBadRequest, err)
+						return errRunTerminate
+					}
 				}
+
 				c.path = path
 				c.state = statePrePlay
 
@@ -623,7 +641,7 @@ func (c *Client) handleRequest(req *base.Request) error {
 
 			// record with UDP
 			if th.Protocol == gortsplib.StreamProtocolUDP {
-				if _, ok := c.conf.ProtocolsParsed[gortsplib.StreamProtocolUDP]; !ok {
+				if _, ok := c.protocols[gortsplib.StreamProtocolUDP]; !ok {
 					c.writeResError(cseq, base.StatusUnsupportedTransport, fmt.Errorf("UDP streaming is disabled"))
 					return errRunTerminate
 				}
@@ -656,7 +674,7 @@ func (c *Client) handleRequest(req *base.Request) error {
 						return &v
 					}(),
 					ClientPorts: th.ClientPorts,
-					ServerPorts: &[2]int{c.conf.RtpPort, c.conf.RtcpPort},
+					ServerPorts: &[2]int{c.serverUdpRtp.Port(), c.serverUdpRtcp.Port()},
 				}
 
 				c.conn.WriteResponse(&base.Response{
@@ -671,7 +689,7 @@ func (c *Client) handleRequest(req *base.Request) error {
 
 				// record with TCP
 			} else {
-				if _, ok := c.conf.ProtocolsParsed[gortsplib.StreamProtocolTCP]; !ok {
+				if _, ok := c.protocols[gortsplib.StreamProtocolTCP]; !ok {
 					c.writeResError(cseq, base.StatusUnsupportedTransport, fmt.Errorf("TCP streaming is disabled"))
 					return errRunTerminate
 				}
@@ -1157,7 +1175,7 @@ func (c *Client) runRecordUDP() {
 			for _, lastUnix := range c.udpLastFrameTimes {
 				last := time.Unix(atomic.LoadInt64(lastUnix), 0)
 
-				if now.Sub(last) >= c.conf.ReadTimeout {
+				if now.Sub(last) >= c.readTimeout {
 					c.log("ERR: no packets received recently (maybe there's a firewall/NAT in between)")
 					c.conn.Close()
 					<-readDone

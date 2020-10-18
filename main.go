@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 
 	"github.com/aler9/gortsplib"
+	"github.com/aler9/gortsplib/base"
 	"gopkg.in/alecthomas/kingpin.v2"
 
 	"github.com/aler9/rtsp-simple-server/client"
@@ -161,8 +162,16 @@ outer:
 			p.onPathClose(pa)
 
 		case conn := <-p.clientNew:
-			c := client.New(&p.clientsWg, p.stats, p.conf,
-				p.serverUdpRtp, p.serverUdpRtcp, conn, p)
+			c := client.New(&p.clientsWg,
+				p.stats,
+				p.serverUdpRtp,
+				p.serverUdpRtcp,
+				p.conf.ReadTimeout,
+				p.conf.WriteTimeout,
+				p.conf.RunOnConnect,
+				p.conf.ProtocolsParsed,
+				conn,
+				p)
 			p.clients[c] = struct{}{}
 
 		case c := <-p.clientClose:
@@ -172,14 +181,50 @@ outer:
 			p.onClientClose(c)
 
 		case req := <-p.clientDescribe:
+			pathConf, err := p.conf.CheckPathNameAndFindConf(req.PathName)
+			if err != nil {
+				req.Res <- path.ClientDescribeRes{nil, err}
+				continue
+			}
+
+			err = req.Client.Authenticate(p.conf.AuthMethodsParsed, pathConf.ReadIpsParsed,
+				pathConf.ReadUser, pathConf.ReadPass, req.Req)
+			if err != nil {
+				req.Res <- path.ClientDescribeRes{nil, err}
+				continue
+			}
+
 			// create path if it doesn't exist
 			if _, ok := p.paths[req.PathName]; !ok {
 				pa := path.New(&p.pathsWg, p.stats, p.serverUdpRtp, p.serverUdpRtcp,
-					p.conf.ReadTimeout, p.conf.WriteTimeout, req.PathName, req.PathConf, p)
+					p.conf.ReadTimeout, p.conf.WriteTimeout, req.PathName, pathConf, p)
 				p.paths[req.PathName] = pa
 			}
 
 			p.paths[req.PathName].OnProgramClientDescribe(req)
+
+		case req := <-p.clientAnnounce:
+			pathConf, err := p.conf.CheckPathNameAndFindConf(req.PathName)
+			if err != nil {
+				req.Res <- path.ClientAnnounceRes{nil, err}
+				continue
+			}
+
+			err = req.Client.Authenticate(p.conf.AuthMethodsParsed,
+				pathConf.PublishIpsParsed, pathConf.PublishUser, pathConf.PublishPass, req.Req)
+			if err != nil {
+				req.Res <- path.ClientAnnounceRes{nil, err}
+				continue
+			}
+
+			// create path if it doesn't exist
+			if _, ok := p.paths[req.PathName]; !ok {
+				pa := path.New(&p.pathsWg, p.stats, p.serverUdpRtp, p.serverUdpRtcp,
+					p.conf.ReadTimeout, p.conf.WriteTimeout, req.PathName, pathConf, p)
+				p.paths[req.PathName] = pa
+			}
+
+			p.paths[req.PathName].OnProgramClientAnnounce(req)
 
 		case req := <-p.clientSetupPlay:
 			if _, ok := p.paths[req.PathName]; !ok {
@@ -187,17 +232,20 @@ outer:
 				continue
 			}
 
-			p.paths[req.PathName].OnProgramClientSetupPlay(req)
-
-		case req := <-p.clientAnnounce:
-			// create path if it doesn't exist
-			if _, ok := p.paths[req.PathName]; !ok {
-				pa := path.New(&p.pathsWg, p.stats, p.serverUdpRtp, p.serverUdpRtcp,
-					p.conf.ReadTimeout, p.conf.WriteTimeout, req.PathName, req.PathConf, p)
-				p.paths[req.PathName] = pa
+			pathConf, err := p.conf.CheckPathNameAndFindConf(req.PathName)
+			if err != nil {
+				req.Res <- path.ClientSetupPlayRes{nil, err}
+				continue
 			}
 
-			p.paths[req.PathName].OnProgramClientAnnounce(req)
+			err = req.Client.Authenticate(p.conf.AuthMethodsParsed,
+				pathConf.ReadIpsParsed, pathConf.ReadUser, pathConf.ReadPass, req.Req)
+			if err != nil {
+				req.Res <- path.ClientSetupPlayRes{nil, err}
+				continue
+			}
+
+			p.paths[req.PathName].OnProgramClientSetupPlay(req)
 
 		case <-p.terminate:
 			break outer
@@ -309,23 +357,23 @@ func (p *program) OnClientClose(c *client.Client) {
 	p.clientClose <- c
 }
 
-func (p *program) OnClientDescribe(c *client.Client, pathName string, pathConf *conf.PathConf) (client.Path, error) {
+func (p *program) OnClientDescribe(c *client.Client, pathName string, req *base.Request) (client.Path, error) {
 	res := make(chan path.ClientDescribeRes)
-	p.clientDescribe <- path.ClientDescribeReq{res, c, pathName, pathConf}
+	p.clientDescribe <- path.ClientDescribeReq{res, c, pathName, req}
 	re := <-res
 	return re.Path, re.Err
 }
 
-func (p *program) OnClientAnnounce(c *client.Client, pathName string, pathConf *conf.PathConf, tracks gortsplib.Tracks) (client.Path, error) {
+func (p *program) OnClientAnnounce(c *client.Client, pathName string, tracks gortsplib.Tracks, req *base.Request) (client.Path, error) {
 	res := make(chan path.ClientAnnounceRes)
-	p.clientAnnounce <- path.ClientAnnounceReq{res, c, pathName, pathConf, tracks}
+	p.clientAnnounce <- path.ClientAnnounceReq{res, c, pathName, tracks, req}
 	re := <-res
 	return re.Path, re.Err
 }
 
-func (p *program) OnClientSetupPlay(c *client.Client, basePath string, trackId int) (client.Path, error) {
+func (p *program) OnClientSetupPlay(c *client.Client, basePath string, trackId int, req *base.Request) (client.Path, error) {
 	res := make(chan path.ClientSetupPlayRes)
-	p.clientSetupPlay <- path.ClientSetupPlayReq{res, c, basePath, trackId}
+	p.clientSetupPlay <- path.ClientSetupPlayReq{res, c, basePath, trackId, req}
 	re := <-res
 	return re.Path, re.Err
 }
