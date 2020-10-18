@@ -1,4 +1,4 @@
-package main
+package path
 
 import (
 	"fmt"
@@ -25,15 +25,52 @@ const (
 	onDemandCmdStopAfterDescribePeriod = 10 * time.Second
 )
 
-type pathParent interface {
+type Parent interface {
 	Log(string, ...interface{})
-	OnPathClose(*path)
+	OnPathClose(*Path)
 	OnPathClientClose(*client.Client)
 }
 
 // a source can be a client, a sourcertsp.Source or a sourcertmp.Source
 type source interface {
 	IsSource()
+}
+
+type ClientDescribeRes struct {
+	Path client.Path
+	Err  error
+}
+
+type ClientDescribeReq struct {
+	Res      chan ClientDescribeRes
+	Client   *client.Client
+	PathName string
+	PathConf *conf.PathConf
+}
+
+type ClientAnnounceRes struct {
+	Path client.Path
+	Err  error
+}
+
+type ClientAnnounceReq struct {
+	Res      chan ClientAnnounceRes
+	Client   *client.Client
+	PathName string
+	PathConf *conf.PathConf
+	Tracks   gortsplib.Tracks
+}
+
+type ClientSetupPlayRes struct {
+	Path client.Path
+	Err  error
+}
+
+type ClientSetupPlayReq struct {
+	Res      chan ClientSetupPlayRes
+	Client   *client.Client
+	PathName string
+	TrackId  int
 }
 
 type clientRemoveReq struct {
@@ -51,17 +88,17 @@ type clientRecordReq struct {
 	client *client.Client
 }
 
-type pathClientState int
+type clientState int
 
 const (
-	pathClientStateWaitingDescribe pathClientState = iota
-	pathClientStatePrePlay
-	pathClientStatePlay
-	pathClientStatePreRecord
-	pathClientStateRecord
+	clientStateWaitingDescribe clientState = iota
+	clientStatePrePlay
+	clientStatePlay
+	clientStatePreRecord
+	clientStateRecord
 )
 
-type path struct {
+type Path struct {
 	wg                     *sync.WaitGroup
 	stats                  *stats.Stats
 	serverUdpRtp           *serverudp.Server
@@ -70,7 +107,7 @@ type path struct {
 	writeTimeout           time.Duration
 	name                   string
 	conf                   *conf.PathConf
-	clients                map[*client.Client]pathClientState
+	clients                map[*client.Client]clientState
 	source                 source
 	sourceReady            bool
 	sourceTrackCount       int
@@ -80,20 +117,20 @@ type path struct {
 	readers                *ReadersMap
 	onInitCmd              *externalcmd.ExternalCmd
 	onDemandCmd            *externalcmd.ExternalCmd
-	parent                 pathParent
+	parent                 Parent
 
 	sourceSetReady    chan struct{}           // from source
 	sourceSetNotReady chan struct{}           // from source
-	clientDescribe    chan clientDescribeReq  // from program
-	clientAnnounce    chan clientAnnounceReq  // from program
-	clientSetupPlay   chan clientSetupPlayReq // from program
+	clientDescribe    chan ClientDescribeReq  // from program
+	clientAnnounce    chan ClientAnnounceReq  // from program
+	clientSetupPlay   chan ClientSetupPlayReq // from program
 	clientPlay        chan clientPlayReq      // from client
 	clientRecord      chan clientRecordReq    // from client
 	clientRemove      chan clientRemoveReq    // from client
 	terminate         chan struct{}
 }
 
-func newPath(
+func New(
 	wg *sync.WaitGroup,
 	stats *stats.Stats,
 	serverUdpRtp *serverudp.Server,
@@ -102,8 +139,8 @@ func newPath(
 	writeTimeout time.Duration,
 	name string,
 	conf *conf.PathConf,
-	parent pathParent) *path {
-	pa := &path{
+	parent Parent) *Path {
+	pa := &Path{
 		wg:                wg,
 		stats:             stats,
 		serverUdpRtp:      serverUdpRtp,
@@ -112,14 +149,14 @@ func newPath(
 		writeTimeout:      writeTimeout,
 		name:              name,
 		conf:              conf,
-		clients:           make(map[*client.Client]pathClientState),
+		clients:           make(map[*client.Client]clientState),
 		readers:           NewReadersMap(),
 		parent:            parent,
 		sourceSetReady:    make(chan struct{}),
 		sourceSetNotReady: make(chan struct{}),
-		clientDescribe:    make(chan clientDescribeReq),
-		clientAnnounce:    make(chan clientAnnounceReq),
-		clientSetupPlay:   make(chan clientSetupPlayReq),
+		clientDescribe:    make(chan ClientDescribeReq),
+		clientAnnounce:    make(chan ClientAnnounceReq),
+		clientSetupPlay:   make(chan ClientSetupPlayReq),
 		clientPlay:        make(chan clientPlayReq),
 		clientRecord:      make(chan clientRecordReq),
 		clientRemove:      make(chan clientRemoveReq),
@@ -131,11 +168,15 @@ func newPath(
 	return pa
 }
 
-func (pa *path) Log(format string, args ...interface{}) {
+func (pa *Path) Close() {
+	close(pa.terminate)
+}
+
+func (pa *Path) Log(format string, args ...interface{}) {
 	pa.parent.Log("[path "+pa.name+"] "+format, args...)
 }
 
-func (pa *path) run() {
+func (pa *Path) run() {
 	defer pa.wg.Done()
 
 	if strings.HasPrefix(pa.conf.Source, "rtsp://") {
@@ -208,16 +249,16 @@ outer:
 
 		case req := <-pa.clientDescribe:
 			// reply immediately
-			req.res <- clientDescribeRes{pa, nil}
-			pa.onClientDescribe(req.client)
+			req.Res <- ClientDescribeRes{pa, nil}
+			pa.onClientDescribe(req.Client)
 
 		case req := <-pa.clientSetupPlay:
-			err := pa.onClientSetupPlay(req.client, req.trackId)
+			err := pa.onClientSetupPlay(req.Client, req.TrackId)
 			if err != nil {
-				req.res <- clientSetupPlayRes{nil, err}
+				req.Res <- ClientSetupPlayRes{nil, err}
 				continue
 			}
-			req.res <- clientSetupPlayRes{pa, nil}
+			req.Res <- ClientSetupPlayRes{pa, nil}
 
 		case req := <-pa.clientPlay:
 			if _, ok := pa.clients[req.client]; ok {
@@ -226,12 +267,12 @@ outer:
 			close(req.res)
 
 		case req := <-pa.clientAnnounce:
-			err := pa.onClientAnnounce(req.client, req.tracks)
+			err := pa.onClientAnnounce(req.Client, req.Tracks)
 			if err != nil {
-				req.res <- clientAnnounceRes{nil, err}
+				req.Res <- ClientAnnounceRes{nil, err}
 				continue
 			}
-			req.res <- clientAnnounceRes{pa, nil}
+			req.Res <- ClientAnnounceRes{pa, nil}
 
 		case req := <-pa.clientRecord:
 			if _, ok := pa.clients[req.client]; ok {
@@ -267,19 +308,19 @@ outer:
 				if !ok {
 					return
 				}
-				req.res <- clientDescribeRes{nil, fmt.Errorf("terminated")}
+				req.Res <- ClientDescribeRes{nil, fmt.Errorf("terminated")}
 
 			case req, ok := <-pa.clientAnnounce:
 				if !ok {
 					return
 				}
-				req.res <- clientAnnounceRes{nil, fmt.Errorf("terminated")}
+				req.Res <- ClientAnnounceRes{nil, fmt.Errorf("terminated")}
 
 			case req, ok := <-pa.clientSetupPlay:
 				if !ok {
 					return
 				}
-				req.res <- clientSetupPlayRes{nil, fmt.Errorf("terminated")}
+				req.Res <- ClientSetupPlayRes{nil, fmt.Errorf("terminated")}
 
 			case req, ok := <-pa.clientPlay:
 				if !ok {
@@ -320,7 +361,7 @@ outer:
 	}
 
 	for c, state := range pa.clients {
-		if state == pathClientStateWaitingDescribe {
+		if state == clientStateWaitingDescribe {
 			delete(pa.clients, c)
 			c.OnPathDescribeData(nil, fmt.Errorf("publisher of path '%s' has timed out", pa.name))
 		} else {
@@ -339,20 +380,20 @@ outer:
 	close(pa.clientRemove)
 }
 
-func (pa *path) hasClients() bool {
+func (pa *Path) hasClients() bool {
 	return len(pa.clients) > 0
 }
 
-func (pa *path) hasClientsWaitingDescribe() bool {
+func (pa *Path) hasClientsWaitingDescribe() bool {
 	for _, state := range pa.clients {
-		if state == pathClientStateWaitingDescribe {
+		if state == clientStateWaitingDescribe {
 			return true
 		}
 	}
 	return false
 }
 
-func (pa *path) hasClientReadersOrWaitingDescribe() bool {
+func (pa *Path) hasClientReadersOrWaitingDescribe() bool {
 	for c := range pa.clients {
 		if c != pa.source {
 			return true
@@ -361,12 +402,12 @@ func (pa *path) hasClientReadersOrWaitingDescribe() bool {
 	return false
 }
 
-func (pa *path) onCheck() bool {
+func (pa *Path) onCheck() bool {
 	// reply to DESCRIBE requests if they are in timeout
 	if pa.hasClientsWaitingDescribe() &&
 		time.Since(pa.lastDescribeActivation) >= describeTimeout {
 		for c, state := range pa.clients {
-			if state == pathClientStateWaitingDescribe {
+			if state == clientStateWaitingDescribe {
 				delete(pa.clients, c)
 				c.OnPathDescribeData(nil, fmt.Errorf("publisher of path '%s' has timed out", pa.name))
 			}
@@ -415,31 +456,31 @@ func (pa *path) onCheck() bool {
 	return true
 }
 
-func (pa *path) onSourceSetReady() {
+func (pa *Path) onSourceSetReady() {
 	pa.sourceReady = true
 
 	// reply to all clients that are waiting for a description
 	for c, state := range pa.clients {
-		if state == pathClientStateWaitingDescribe {
+		if state == clientStateWaitingDescribe {
 			delete(pa.clients, c)
 			c.OnPathDescribeData(pa.sourceSdp, nil)
 		}
 	}
 }
 
-func (pa *path) onSourceSetNotReady() {
+func (pa *Path) onSourceSetNotReady() {
 	pa.sourceReady = false
 
 	// close all clients that are reading or waiting to read
 	for c, state := range pa.clients {
-		if state != pathClientStateWaitingDescribe && c != pa.source {
+		if state != clientStateWaitingDescribe && c != pa.source {
 			pa.onClientRemove(c)
 			pa.parent.OnPathClientClose(c)
 		}
 	}
 }
 
-func (pa *path) onClientDescribe(c *client.Client) {
+func (pa *Path) onClientDescribe(c *client.Client) {
 	pa.lastDescribeReq = time.Now()
 
 	// publisher not found
@@ -457,7 +498,7 @@ func (pa *path) onClientDescribe(c *client.Client) {
 				}
 			}
 
-			pa.clients[c] = pathClientStateWaitingDescribe
+			pa.clients[c] = clientStateWaitingDescribe
 
 			// no on-demand: reply with 404
 		} else {
@@ -485,7 +526,7 @@ func (pa *path) onClientDescribe(c *client.Client) {
 			}
 		}
 
-		pa.clients[c] = pathClientStateWaitingDescribe
+		pa.clients[c] = clientStateWaitingDescribe
 
 		// publisher was found and is ready
 	} else {
@@ -493,7 +534,7 @@ func (pa *path) onClientDescribe(c *client.Client) {
 	}
 }
 
-func (pa *path) onClientSetupPlay(c *client.Client, trackId int) error {
+func (pa *Path) onClientSetupPlay(c *client.Client, trackId int) error {
 	if !pa.sourceReady {
 		return fmt.Errorf("no one is publishing on path '%s'", pa.name)
 	}
@@ -502,44 +543,44 @@ func (pa *path) onClientSetupPlay(c *client.Client, trackId int) error {
 		return fmt.Errorf("track %d does not exist", trackId)
 	}
 
-	pa.clients[c] = pathClientStatePrePlay
+	pa.clients[c] = clientStatePrePlay
 	return nil
 }
 
-func (pa *path) onClientPlay(c *client.Client) {
+func (pa *Path) onClientPlay(c *client.Client) {
 	atomic.AddInt64(pa.stats.CountReaders, 1)
-	pa.clients[c] = pathClientStatePlay
+	pa.clients[c] = clientStatePlay
 	pa.readers.Add(c)
 }
 
-func (pa *path) onClientAnnounce(c *client.Client, tracks gortsplib.Tracks) error {
+func (pa *Path) onClientAnnounce(c *client.Client, tracks gortsplib.Tracks) error {
 	if pa.source != nil {
 		return fmt.Errorf("someone is already publishing on path '%s'", pa.name)
 	}
 
-	pa.clients[c] = pathClientStatePreRecord
+	pa.clients[c] = clientStatePreRecord
 	pa.source = c
 	pa.sourceTrackCount = len(tracks)
 	pa.sourceSdp = tracks.Write()
 	return nil
 }
 
-func (pa *path) onClientRecord(c *client.Client) {
+func (pa *Path) onClientRecord(c *client.Client) {
 	atomic.AddInt64(pa.stats.CountPublishers, 1)
-	pa.clients[c] = pathClientStateRecord
+	pa.clients[c] = clientStateRecord
 	pa.onSourceSetReady()
 }
 
-func (pa *path) onClientRemove(c *client.Client) {
+func (pa *Path) onClientRemove(c *client.Client) {
 	state := pa.clients[c]
 	delete(pa.clients, c)
 
 	switch state {
-	case pathClientStatePlay:
+	case clientStatePlay:
 		atomic.AddInt64(pa.stats.CountReaders, -1)
 		pa.readers.Remove(c)
 
-	case pathClientStateRecord:
+	case clientStateRecord:
 		atomic.AddInt64(pa.stats.CountPublishers, -1)
 		pa.onSourceSetNotReady()
 	}
@@ -549,7 +590,7 @@ func (pa *path) onClientRemove(c *client.Client) {
 
 		// close all clients that are reading or waiting to read
 		for oc, state := range pa.clients {
-			if state != pathClientStateWaitingDescribe && oc != pa.source {
+			if state != clientStateWaitingDescribe && oc != pa.source {
 				pa.onClientRemove(oc)
 				pa.parent.OnPathClientClose(oc)
 			}
@@ -557,50 +598,62 @@ func (pa *path) onClientRemove(c *client.Client) {
 	}
 }
 
-func (pa *path) OnSourceReady(tracks gortsplib.Tracks) {
+func (pa *Path) OnSourceReady(tracks gortsplib.Tracks) {
 	pa.sourceSdp = tracks.Write()
 	pa.sourceTrackCount = len(tracks)
 	pa.sourceSetReady <- struct{}{}
 }
 
-func (pa *path) OnSourceNotReady() {
+func (pa *Path) OnSourceNotReady() {
 	pa.sourceSetNotReady <- struct{}{}
 }
 
-func (pa *path) OnSourceFrame(trackId int, streamType gortsplib.StreamType, buf []byte) {
+func (pa *Path) OnSourceFrame(trackId int, streamType gortsplib.StreamType, buf []byte) {
 	pa.readers.ForwardFrame(trackId, streamType, buf)
 }
 
-func (pa *path) Name() string {
+func (pa *Path) Name() string {
 	return pa.name
 }
 
-func (pa *path) SourceTrackCount() int {
+func (pa *Path) SourceTrackCount() int {
 	return pa.sourceTrackCount
 }
 
-func (pa *path) Conf() *conf.PathConf {
+func (pa *Path) Conf() *conf.PathConf {
 	return pa.conf
 }
 
-func (pa *path) OnClientRemove(c *client.Client) {
+func (pa *Path) OnProgramClientDescribe(req ClientDescribeReq) {
+	pa.clientDescribe <- req
+}
+
+func (pa *Path) OnProgramClientSetupPlay(req ClientSetupPlayReq) {
+	pa.clientSetupPlay <- req
+}
+
+func (pa *Path) OnProgramClientAnnounce(req ClientAnnounceReq) {
+	pa.clientAnnounce <- req
+}
+
+func (pa *Path) OnClientRemove(c *client.Client) {
 	res := make(chan struct{})
 	pa.clientRemove <- clientRemoveReq{res, c}
 	<-res
 }
 
-func (pa *path) OnClientPlay(c *client.Client) {
+func (pa *Path) OnClientPlay(c *client.Client) {
 	res := make(chan struct{})
 	pa.clientPlay <- clientPlayReq{res, c}
 	<-res
 }
 
-func (pa *path) OnClientRecord(c *client.Client) {
+func (pa *Path) OnClientRecord(c *client.Client) {
 	res := make(chan struct{})
 	pa.clientRecord <- clientRecordReq{res, c}
 	<-res
 }
 
-func (pa *path) OnClientFrame(trackId int, streamType gortsplib.StreamType, buf []byte) {
+func (pa *Path) OnClientFrame(trackId int, streamType gortsplib.StreamType, buf []byte) {
 	pa.readers.ForwardFrame(trackId, streamType, buf)
 }

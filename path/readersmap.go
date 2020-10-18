@@ -1,4 +1,4 @@
-package main
+package path
 
 import (
 	"sync"
@@ -8,7 +8,7 @@ import (
 )
 
 type Reader interface {
-	OnReaderFrame(trackId int, streamType base.StreamType, buf []byte)
+	OnReaderFrame(int, base.StreamType, []byte)
 }
 
 type ReadersMap struct {

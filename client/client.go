@@ -157,12 +157,12 @@ func New(
 	return c
 }
 
-func (c *Client) IsSource() {}
-
 func (c *Client) Close() {
 	atomic.AddInt64(c.stats.CountClients, -1)
 	close(c.terminate)
 }
+
+func (c *Client) IsSource() {}
 
 func (c *Client) log(format string, args ...interface{}) {
 	c.parent.Log("[client %s] "+format, append([]interface{}{c.conn.NetConn().RemoteAddr().String()}, args...)...)

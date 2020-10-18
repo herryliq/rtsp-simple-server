@@ -15,6 +15,7 @@ import (
 	"github.com/aler9/rtsp-simple-server/conf"
 	"github.com/aler9/rtsp-simple-server/loghandler"
 	"github.com/aler9/rtsp-simple-server/metrics"
+	"github.com/aler9/rtsp-simple-server/path"
 	"github.com/aler9/rtsp-simple-server/pprof"
 	"github.com/aler9/rtsp-simple-server/servertcp"
 	"github.com/aler9/rtsp-simple-server/serverudp"
@@ -22,43 +23,6 @@ import (
 )
 
 var Version = "v0.0.0"
-
-type clientDescribeRes struct {
-	path client.Path
-	err  error
-}
-
-type clientDescribeReq struct {
-	res      chan clientDescribeRes
-	client   *client.Client
-	pathName string
-	pathConf *conf.PathConf
-}
-
-type clientAnnounceRes struct {
-	path client.Path
-	err  error
-}
-
-type clientAnnounceReq struct {
-	res      chan clientAnnounceRes
-	client   *client.Client
-	pathName string
-	pathConf *conf.PathConf
-	tracks   gortsplib.Tracks
-}
-
-type clientSetupPlayRes struct {
-	path client.Path
-	err  error
-}
-
-type clientSetupPlayReq struct {
-	res      chan clientSetupPlayRes
-	client   *client.Client
-	pathName string
-	trackId  int
-}
 
 type program struct {
 	conf          *conf.Conf
@@ -68,18 +32,18 @@ type program struct {
 	serverUdpRtp  *serverudp.Server
 	serverUdpRtcp *serverudp.Server
 	serverTcp     *servertcp.Server
-	paths         map[string]*path
+	paths         map[string]*path.Path
 	pathsWg       sync.WaitGroup
 	clients       map[*client.Client]struct{}
 	clientsWg     sync.WaitGroup
 	stats         *stats.Stats
 
-	pathClose       chan *path
+	pathClose       chan *path.Path
 	clientNew       chan net.Conn
 	clientClose     chan *client.Client
-	clientDescribe  chan clientDescribeReq
-	clientAnnounce  chan clientAnnounceReq
-	clientSetupPlay chan clientSetupPlayReq
+	clientDescribe  chan path.ClientDescribeReq
+	clientAnnounce  chan path.ClientAnnounceReq
+	clientSetupPlay chan path.ClientSetupPlayReq
 
 	terminate chan struct{}
 	done      chan struct{}
@@ -106,15 +70,15 @@ func newProgram(args []string) (*program, error) {
 
 	p := &program{
 		conf:            conf,
-		paths:           make(map[string]*path),
+		paths:           make(map[string]*path.Path),
 		clients:         make(map[*client.Client]struct{}),
 		stats:           stats.New(),
-		pathClose:       make(chan *path),
+		pathClose:       make(chan *path.Path),
 		clientNew:       make(chan net.Conn),
 		clientClose:     make(chan *client.Client),
-		clientDescribe:  make(chan clientDescribeReq),
-		clientAnnounce:  make(chan clientAnnounceReq),
-		clientSetupPlay: make(chan clientSetupPlayReq),
+		clientDescribe:  make(chan path.ClientDescribeReq),
+		clientAnnounce:  make(chan path.ClientAnnounceReq),
+		clientSetupPlay: make(chan path.ClientSetupPlayReq),
 		terminate:       make(chan struct{}),
 		done:            make(chan struct{}),
 	}
@@ -167,7 +131,7 @@ func newProgram(args []string) (*program, error) {
 
 	for name, pathConf := range conf.Paths {
 		if pathConf.Regexp == nil {
-			pa := newPath(&p.pathsWg, p.stats, p.serverUdpRtp, p.serverUdpRtcp,
+			pa := path.New(&p.pathsWg, p.stats, p.serverUdpRtp, p.serverUdpRtcp,
 				p.conf.ReadTimeout, p.conf.WriteTimeout, name, pathConf, p)
 			p.paths[name] = pa
 		}
@@ -209,31 +173,31 @@ outer:
 
 		case req := <-p.clientDescribe:
 			// create path if it doesn't exist
-			if _, ok := p.paths[req.pathName]; !ok {
-				pa := newPath(&p.pathsWg, p.stats, p.serverUdpRtp, p.serverUdpRtcp,
-					p.conf.ReadTimeout, p.conf.WriteTimeout, req.pathName, req.pathConf, p)
-				p.paths[req.pathName] = pa
+			if _, ok := p.paths[req.PathName]; !ok {
+				pa := path.New(&p.pathsWg, p.stats, p.serverUdpRtp, p.serverUdpRtcp,
+					p.conf.ReadTimeout, p.conf.WriteTimeout, req.PathName, req.PathConf, p)
+				p.paths[req.PathName] = pa
 			}
 
-			p.paths[req.pathName].clientDescribe <- req
+			p.paths[req.PathName].OnProgramClientDescribe(req)
 
 		case req := <-p.clientSetupPlay:
-			if _, ok := p.paths[req.pathName]; !ok {
-				req.res <- clientSetupPlayRes{nil, fmt.Errorf("no one is publishing on path '%s'", req.pathName)}
+			if _, ok := p.paths[req.PathName]; !ok {
+				req.Res <- path.ClientSetupPlayRes{nil, fmt.Errorf("no one is publishing on path '%s'", req.PathName)}
 				continue
 			}
 
-			p.paths[req.pathName].clientSetupPlay <- req
+			p.paths[req.PathName].OnProgramClientSetupPlay(req)
 
 		case req := <-p.clientAnnounce:
 			// create path if it doesn't exist
-			if _, ok := p.paths[req.pathName]; !ok {
-				pa := newPath(&p.pathsWg, p.stats, p.serverUdpRtp, p.serverUdpRtcp,
-					p.conf.ReadTimeout, p.conf.WriteTimeout, req.pathName, req.pathConf, p)
-				p.paths[req.pathName] = pa
+			if _, ok := p.paths[req.PathName]; !ok {
+				pa := path.New(&p.pathsWg, p.stats, p.serverUdpRtp, p.serverUdpRtcp,
+					p.conf.ReadTimeout, p.conf.WriteTimeout, req.PathName, req.PathConf, p)
+				p.paths[req.PathName] = pa
 			}
 
-			p.paths[req.pathName].clientAnnounce <- req
+			p.paths[req.PathName].OnProgramClientAnnounce(req)
 
 		case <-p.terminate:
 			break outer
@@ -261,13 +225,13 @@ func (p *program) closeResources() {
 			case <-p.clientClose:
 
 			case req := <-p.clientDescribe:
-				req.res <- clientDescribeRes{nil, fmt.Errorf("terminated")}
+				req.Res <- path.ClientDescribeRes{nil, fmt.Errorf("terminated")}
 
 			case req := <-p.clientAnnounce:
-				req.res <- clientAnnounceRes{nil, fmt.Errorf("terminated")}
+				req.Res <- path.ClientAnnounceRes{nil, fmt.Errorf("terminated")}
 
 			case req := <-p.clientSetupPlay:
-				req.res <- clientSetupPlayRes{nil, fmt.Errorf("terminated")}
+				req.Res <- path.ClientSetupPlayRes{nil, fmt.Errorf("terminated")}
 			}
 		}
 	}()
@@ -319,9 +283,9 @@ func (p *program) close() {
 	<-p.done
 }
 
-func (p *program) onPathClose(pa *path) {
-	delete(p.paths, pa.name)
-	close(pa.terminate)
+func (p *program) onPathClose(pa *path.Path) {
+	delete(p.paths, pa.Name())
+	pa.Close()
 }
 
 func (p *program) onClientClose(c *client.Client) {
@@ -333,7 +297,7 @@ func (p *program) OnServerTCPConn(conn net.Conn) {
 	p.clientNew <- conn
 }
 
-func (p *program) OnPathClose(pa *path) {
+func (p *program) OnPathClose(pa *path.Path) {
 	p.pathClose <- pa
 }
 
@@ -346,24 +310,24 @@ func (p *program) OnClientClose(c *client.Client) {
 }
 
 func (p *program) OnClientDescribe(c *client.Client, pathName string, pathConf *conf.PathConf) (client.Path, error) {
-	res := make(chan clientDescribeRes)
-	p.clientDescribe <- clientDescribeReq{res, c, pathName, pathConf}
+	res := make(chan path.ClientDescribeRes)
+	p.clientDescribe <- path.ClientDescribeReq{res, c, pathName, pathConf}
 	re := <-res
-	return re.path, re.err
+	return re.Path, re.Err
 }
 
 func (p *program) OnClientAnnounce(c *client.Client, pathName string, pathConf *conf.PathConf, tracks gortsplib.Tracks) (client.Path, error) {
-	res := make(chan clientAnnounceRes)
-	p.clientAnnounce <- clientAnnounceReq{res, c, pathName, pathConf, tracks}
+	res := make(chan path.ClientAnnounceRes)
+	p.clientAnnounce <- path.ClientAnnounceReq{res, c, pathName, pathConf, tracks}
 	re := <-res
-	return re.path, re.err
+	return re.Path, re.Err
 }
 
 func (p *program) OnClientSetupPlay(c *client.Client, basePath string, trackId int) (client.Path, error) {
-	res := make(chan clientSetupPlayRes)
-	p.clientSetupPlay <- clientSetupPlayReq{res, c, basePath, trackId}
+	res := make(chan path.ClientSetupPlayRes)
+	p.clientSetupPlay <- path.ClientSetupPlayReq{res, c, basePath, trackId}
 	re := <-res
-	return re.path, re.err
+	return re.Path, re.Err
 }
 
 func main() {
