@@ -16,7 +16,7 @@ type Parent interface {
 	Log(string, ...interface{})
 	OnSourceReady(gortsplib.Tracks)
 	OnSourceNotReady()
-	OnSourceFrame(int, gortsplib.StreamType, []byte)
+	OnFrame(int, gortsplib.StreamType, []byte)
 }
 
 type State int
@@ -228,7 +228,7 @@ func (s *Source) runUDP(u *url.URL, conn *gortsplib.ConnClient, tracks gortsplib
 					break
 				}
 
-				s.parent.OnSourceFrame(trackId, gortsplib.StreamTypeRtp, buf)
+				s.parent.OnFrame(trackId, gortsplib.StreamTypeRtp, buf)
 			}
 		}(trackId)
 	}
@@ -245,7 +245,7 @@ func (s *Source) runUDP(u *url.URL, conn *gortsplib.ConnClient, tracks gortsplib
 					break
 				}
 
-				s.parent.OnSourceFrame(trackId, gortsplib.StreamTypeRtcp, buf)
+				s.parent.OnFrame(trackId, gortsplib.StreamTypeRtcp, buf)
 			}
 		}(trackId)
 	}
@@ -311,7 +311,7 @@ func (s *Source) runTCP(u *url.URL, conn *gortsplib.ConnClient, tracks gortsplib
 				return
 			}
 
-			s.parent.OnSourceFrame(trackId, streamType, content)
+			s.parent.OnFrame(trackId, streamType, content)
 		}
 	}()
 

@@ -196,7 +196,7 @@ func Load(fpath string) (*Conf, error) {
 
 		// normal path
 		if name[0] != '~' {
-			err := checkPathName(name)
+			err := CheckPathName(name)
 			if err != nil {
 				return nil, fmt.Errorf("invalid path name: %s (%s)", err, name)
 			}
@@ -312,25 +312,4 @@ func Load(fpath string) (*Conf, error) {
 	}
 
 	return conf, nil
-}
-
-func (conf *Conf) CheckPathNameAndFindConf(name string) (*PathConf, error) {
-	err := checkPathName(name)
-	if err != nil {
-		return nil, fmt.Errorf("invalid path name: %s (%s)", err, name)
-	}
-
-	// normal path
-	if pconf, ok := conf.Paths[name]; ok {
-		return pconf, nil
-	}
-
-	// regular expression path
-	for _, pconf := range conf.Paths {
-		if pconf.Regexp != nil && pconf.Regexp.MatchString(name) {
-			return pconf, nil
-		}
-	}
-
-	return nil, fmt.Errorf("unable to find a valid configuration for path '%s'", name)
 }

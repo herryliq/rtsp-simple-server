@@ -84,7 +84,7 @@ type Path interface {
 	OnClientRemove(*Client)
 	OnClientPlay(*Client)
 	OnClientRecord(*Client)
-	OnClientFrame(int, gortsplib.StreamType, []byte)
+	OnFrame(int, gortsplib.StreamType, []byte)
 }
 
 type Parent interface {
@@ -1229,7 +1229,7 @@ func (c *Client) runRecordTCP() {
 				}
 
 				c.rtcpReceivers[recvt.TrackId].OnFrame(recvt.StreamType, recvt.Content)
-				c.path.OnClientFrame(recvt.TrackId, recvt.StreamType, recvt.Content)
+				c.path.OnFrame(recvt.TrackId, recvt.StreamType, recvt.Content)
 
 			case *base.Request:
 				err := c.handleRequest(recvt)
@@ -1288,7 +1288,7 @@ func (c *Client) OnUdpPublisherFrame(trackId int, streamType base.StreamType, bu
 	atomic.StoreInt64(c.udpLastFrameTimes[trackId], time.Now().Unix())
 
 	c.rtcpReceivers[trackId].OnFrame(streamType, buf)
-	c.path.OnClientFrame(trackId, streamType, buf)
+	c.path.OnFrame(trackId, streamType, buf)
 }
 
 func (c *Client) OnReaderFrame(trackId int, streamType base.StreamType, buf []byte) {

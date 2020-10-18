@@ -181,7 +181,7 @@ outer:
 			p.onClientClose(c)
 
 		case req := <-p.clientDescribe:
-			pathConf, err := p.conf.CheckPathNameAndFindConf(req.PathName)
+			pathConf, err := p.findPathConf(req.PathName)
 			if err != nil {
 				req.Res <- path.ClientDescribeRes{nil, err}
 				continue
@@ -204,7 +204,7 @@ outer:
 			p.paths[req.PathName].OnProgramClientDescribe(req)
 
 		case req := <-p.clientAnnounce:
-			pathConf, err := p.conf.CheckPathNameAndFindConf(req.PathName)
+			pathConf, err := p.findPathConf(req.PathName)
 			if err != nil {
 				req.Res <- path.ClientAnnounceRes{nil, err}
 				continue
@@ -232,7 +232,7 @@ outer:
 				continue
 			}
 
-			pathConf, err := p.conf.CheckPathNameAndFindConf(req.PathName)
+			pathConf, err := p.findPathConf(req.PathName)
 			if err != nil {
 				req.Res <- path.ClientSetupPlayRes{nil, err}
 				continue
@@ -329,6 +329,27 @@ func (p *program) closeResources() {
 func (p *program) close() {
 	close(p.terminate)
 	<-p.done
+}
+
+func (p *program) findPathConf(name string) (*conf.PathConf, error) {
+	err := conf.CheckPathName(name)
+	if err != nil {
+		return nil, fmt.Errorf("invalid path name: %s (%s)", err, name)
+	}
+
+	// normal path
+	if pathConf, ok := p.conf.Paths[name]; ok {
+		return pathConf, nil
+	}
+
+	// regular expression path
+	for _, pathConf := range p.conf.Paths {
+		if pathConf.Regexp != nil && pathConf.Regexp.MatchString(name) {
+			return pathConf, nil
+		}
+	}
+
+	return nil, fmt.Errorf("unable to find a valid configuration for path '%s'", name)
 }
 
 func (p *program) onPathClose(pa *path.Path) {

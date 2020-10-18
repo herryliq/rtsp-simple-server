@@ -11,32 +11,32 @@ type Reader interface {
 	OnReaderFrame(int, base.StreamType, []byte)
 }
 
-type ReadersMap struct {
+type readersMap struct {
 	mutex sync.RWMutex
 	ma    map[Reader]struct{}
 }
 
-func NewReadersMap() *ReadersMap {
-	return &ReadersMap{
+func newReadersMap() *readersMap {
+	return &readersMap{
 		ma: make(map[Reader]struct{}),
 	}
 }
 
-func (m *ReadersMap) Add(reader Reader) {
+func (m *readersMap) add(reader Reader) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
 	m.ma[reader] = struct{}{}
 }
 
-func (m *ReadersMap) Remove(reader Reader) {
+func (m *readersMap) remove(reader Reader) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
 	delete(m.ma, reader)
 }
 
-func (m *ReadersMap) ForwardFrame(trackId int, streamType gortsplib.StreamType, buf []byte) {
+func (m *readersMap) forwardFrame(trackId int, streamType gortsplib.StreamType, buf []byte) {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
 

@@ -22,7 +22,7 @@ type Parent interface {
 	Log(string, ...interface{})
 	OnSourceReady(gortsplib.Tracks)
 	OnSourceNotReady()
-	OnSourceFrame(int, gortsplib.StreamType, []byte)
+	OnFrame(int, gortsplib.StreamType, []byte)
 }
 
 type State int
@@ -299,7 +299,7 @@ func (s *Source) runInnerInner() bool {
 				}
 
 				for _, f := range frames {
-					s.parent.OnSourceFrame(videoTrack.Id, gortsplib.StreamTypeRtp, f)
+					s.parent.OnFrame(videoTrack.Id, gortsplib.StreamTypeRtp, f)
 				}
 
 			case av.AAC:
@@ -315,7 +315,7 @@ func (s *Source) runInnerInner() bool {
 				}
 
 				for _, f := range frames {
-					s.parent.OnSourceFrame(audioTrack.Id, gortsplib.StreamTypeRtp, f)
+					s.parent.OnFrame(audioTrack.Id, gortsplib.StreamTypeRtp, f)
 				}
 
 			default:

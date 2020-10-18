@@ -116,7 +116,7 @@ type Path struct {
 	sourceSdp              []byte
 	lastDescribeReq        time.Time
 	lastDescribeActivation time.Time
-	readers                *ReadersMap
+	readers                *readersMap
 	onInitCmd              *externalcmd.ExternalCmd
 	onDemandCmd            *externalcmd.ExternalCmd
 	parent                 Parent
@@ -153,7 +153,7 @@ func New(
 		name:              name,
 		conf:              conf,
 		clients:           make(map[*client.Client]clientState),
-		readers:           NewReadersMap(),
+		readers:           newReadersMap(),
 		parent:            parent,
 		sourceSetReady:    make(chan struct{}),
 		sourceSetNotReady: make(chan struct{}),
@@ -553,7 +553,7 @@ func (pa *Path) onClientSetupPlay(c *client.Client, trackId int) error {
 func (pa *Path) onClientPlay(c *client.Client) {
 	atomic.AddInt64(pa.stats.CountReaders, 1)
 	pa.clients[c] = clientStatePlay
-	pa.readers.Add(c)
+	pa.readers.add(c)
 }
 
 func (pa *Path) onClientAnnounce(c *client.Client, tracks gortsplib.Tracks) error {
@@ -581,7 +581,7 @@ func (pa *Path) onClientRemove(c *client.Client) {
 	switch state {
 	case clientStatePlay:
 		atomic.AddInt64(pa.stats.CountReaders, -1)
-		pa.readers.Remove(c)
+		pa.readers.remove(c)
 
 	case clientStateRecord:
 		atomic.AddInt64(pa.stats.CountPublishers, -1)
@@ -609,10 +609,6 @@ func (pa *Path) OnSourceReady(tracks gortsplib.Tracks) {
 
 func (pa *Path) OnSourceNotReady() {
 	pa.sourceSetNotReady <- struct{}{}
-}
-
-func (pa *Path) OnSourceFrame(trackId int, streamType gortsplib.StreamType, buf []byte) {
-	pa.readers.ForwardFrame(trackId, streamType, buf)
 }
 
 func (pa *Path) Name() string {
@@ -657,6 +653,6 @@ func (pa *Path) OnClientRecord(c *client.Client) {
 	<-res
 }
 
-func (pa *Path) OnClientFrame(trackId int, streamType gortsplib.StreamType, buf []byte) {
-	pa.readers.ForwardFrame(trackId, streamType, buf)
+func (pa *Path) OnFrame(trackId int, streamType gortsplib.StreamType, buf []byte) {
+	pa.readers.forwardFrame(trackId, streamType, buf)
 }

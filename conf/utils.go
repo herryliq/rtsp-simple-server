@@ -8,7 +8,7 @@ import (
 
 var rePathName = regexp.MustCompile("^[0-9a-zA-Z_\\-/]+$")
 
-func checkPathName(name string) error {
+func CheckPathName(name string) error {
 	if name == "" {
 		return fmt.Errorf("cannot be empty")
 	}
