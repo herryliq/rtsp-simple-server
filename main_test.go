@@ -209,10 +209,6 @@ func TestEnvironmentNoFile(t *testing.T) {
 	require.Equal(t, true, ok)
 	require.Equal(t, &conf.PathConf{
 		Source: "rtsp://testing",
-		SourceUrl: func() *url.URL {
-			u, _ := url.Parse("rtsp://testing:554")
-			return u
-		}(),
 		SourceProtocol: "udp",
 	}, pa)
 }
